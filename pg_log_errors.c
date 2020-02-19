@@ -71,6 +71,8 @@ const int max_number_of_intervals = 360;
 static int current_interval_index;
 
 const char *file_name = "/var/log/pg_log_errors";
+const char *temp_prefix = "_temp";
+const int max_length_of_filename = 200;
 
 typedef struct hashkey {
     int num;
@@ -112,7 +114,18 @@ pg_log_errors_sighup(SIGNAL_ARGS)
 static void
 pg_log_errors_init()
 {
+    FILE *file = NULL;
     pg_log_errors_load_params();
+    // create file if not exist to prevent error in update step (while deleting file)
+    file = fopen(file_name, "w");
+    if (file == NULL) {
+        ereport(LOG,
+                (errcode_for_file_access(),
+                        errmsg("could not write file \"%s\": %m",
+                               file_name)));
+    }
+
+    fclose(file);
     if (!current_interval_index) {
         current_interval_index = 0;
     }
@@ -132,8 +145,13 @@ pg_log_errors_update_info()
     if (messages_info_hashtable == NULL) {
         return;
     }
+    char temp_filename[max_length_of_filename];
 
-    file = fopen(file_name, "w");
+    strcpy(temp_filename,file_name);
+    strcat(temp_filename,temp_prefix);
+
+    file = fopen(temp_filename, "w");
+
     if (file == NULL) {
         ereport(LOG,
                 (errcode_for_file_access(),
@@ -186,9 +204,13 @@ pg_log_errors_update_info()
                 total_messages_at_last_interval[j]
                 );
     }
+    current_interval_index = (current_interval_index + 1) % intervals_count;
+
     fprintf(file, "\n}\n");
     fclose(file);
-    current_interval_index = (current_interval_index + 1) % intervals_count;
+
+    remove(file_name);
+    rename(temp_filename, file_name);
 }
 
 void
