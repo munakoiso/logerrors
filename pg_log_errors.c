@@ -1,13 +1,3 @@
- *      once in a while.
- *
- * Copyright (c) 1996-2018, PostgreSQL Global Development Group
- *
- * IDENTIFICATION
- *        pg_log_errors/pg_log_errors.c
- *
- *-------------------------------------------------------------------------
- */
-
 /* Some general headers for custom bgworker facility */
 #include "postgres.h"
 #include "fmgr.h"
@@ -37,9 +27,7 @@ static void pgss_shmem_startup(void);
 
 static void pg_log_errors_init_intervals(void);
 
-#if PG_VERSION_NUM >= 100000
 void pg_log_errors_main(Datum) pg_attribute_noreturn();
-#endif
 /* Signal handling */
 static volatile sig_atomic_t got_sigterm = false;
 static volatile sig_atomic_t got_sighup = false;
@@ -48,7 +36,7 @@ static volatile sig_atomic_t got_sighup = false;
 // one interval in buffer to count messages (ms)
 static int interval = 5000;
 // while that count of intervals messages doesn't dropping from statistic
-static int intervals_count = 2;
+static int intervals_count = 120;
 
 /* Worker name */
 static char *worker_name = "pg_log_errors";
@@ -69,8 +57,12 @@ const int message_types_count = 3;
 const char message_type_names[][10] = {"WARNING", "ERROR", "FATAL"};
 const int message_types_codes[] = {WARNING, ERROR, FATAL};
 
+// counters of messages (depends on message_types_count)
+static int total_messages_at_last_interval[3];
+static int total_messages_at_buffer[3];
+
 //number of time intervals to save in buffer
-const int max_number_of_intervals = 120;
+const int max_number_of_intervals = 360;
 
 // index of current interval in buffer
 static int current_interval_index;
@@ -86,7 +78,7 @@ typedef struct message_info {
     ErrorCode key;
     int message_count[3];
     // sum in buffer at previous interval
-    int prev_sum[3];
+    int sum_in_buffer[3];
     int intervals[3][120];
     char *name;
 } MessageInfo;
@@ -120,6 +112,8 @@ pg_log_errors_init()
     if (current_interval_index == NULL) {
         current_interval_index = 0;
     }
+    MemSet(&total_messages_at_last_interval, 0, message_types_count);
+    MemSet(&total_messages_at_buffer, 0, message_types_count);
 }
 
 static void
@@ -131,40 +125,63 @@ pg_log_errors_update_info()
     ErrorCode key;
     MessageInfo *info;
     bool found;
-    // delete previous output
+    FILE *file = NULL;
 
-    print_log("", file_name, "w");
+    file = fopen(file_name, "w");
+    if (file == NULL) {
+        ereport(LOG,
+                (errcode_for_file_access(),
+                        errmsg("could not write file \"%s\": %m",
+                               file_name)));
+        return;
+    }
+
     for (int j = 0; j < message_types_count; ++j)
     {
+        total_messages_at_last_interval[j] = 0;
+        total_messages_at_buffer[j] = 0;
         for (int i = 0; i < error_types_count; ++i)
         {
             key.num = error_codes[i];
             info = hash_search(messages_info_hashtable, (void *)&key, HASH_FIND, &found);
             if (!found) {
-                // don't know why not found. Mb panic?
+                FreeFile(file);
                 return;
             }
 
-            LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
-            info->prev_sum[j] = info->prev_sum[j] - info->intervals[j][current_interval_index] + info->message_count[j];
+            info->sum_in_buffer[j] = info->sum_in_buffer[j] - info->intervals[j][current_interval_index] + info->message_count[j];
+            total_messages_at_buffer[j] += info->sum_in_buffer[j];
+            total_messages_at_last_interval[j] += info->message_count[j];
             info->intervals[j][current_interval_index] = info->message_count[j];
             info->message_count[j] = 0;
-            if (info->prev_sum[j] > 0) {
-                char str[100];
-                sprintf(str, "type: %s,\nname: %s,\ncount:%d\n", message_type_names[j], info->name, info->prev_sum[j]);
-                print_log(str, file_name, "a");
+            if (info->sum_in_buffer[j] > 0) {
+                fprintf(file, "%s: %s: %d\n",
+                        message_type_names[j],
+                        info->name,
+                        info->sum_in_buffer[j]);
             }
-            LWLockRelease(AddinShmemInitLock);
         }
+
     }
+    for (int j = 0; j < message_types_count; ++j)
+    {
+        fprintf(file, "%sS at last %ds : %d\n",
+                message_type_names[j],
+                interval / 1000 * intervals_count,
+                total_messages_at_buffer[j]);
+    }
+    for (int j = 0; j < message_types_count; ++j)
+    {
+        fprintf(file, "%sS at last %ds : %d\n",
+                message_type_names[j],
+                interval / 1000,
+                total_messages_at_last_interval[j]);
+    }
+    fclose(file);
     current_interval_index = (current_interval_index + 1) % intervals_count;
 }
 
-#if PG_VERSION_NUM < 100000
-static void
-#else
 void
-#endif
 pg_log_errors_main(Datum main_arg)
 {
     /* Register functions for SIGTERM/SIGHUP management */
@@ -189,12 +206,8 @@ pg_log_errors_main(Datum main_arg)
         int rc;
         /* Wait necessary amount of time */
         rc = WaitLatch(&MyProc->procLatch,
-                       WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
-#if PG_VERSION_NUM < 100000
-                       interval);
-#else
-        interval, PG_WAIT_EXTENSION);
-#endif
+                       WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH, interval, PG_WAIT_EXTENSION);
+
         ResetLatch(&MyProc->procLatch);
         /* Emergency bailout if postmaster has died */
         if (rc & WL_POSTMASTER_DEATH)
@@ -244,13 +257,11 @@ emit_log_hook_impl(ErrorData *edata)
             key.num = edata->sqlerrcode;
             elem = hash_search(messages_info_hashtable, (void *) &key, HASH_FIND, &found);
 
-            LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
             if (!found) {
                 key.num = not_known_error_code;
                 elem = hash_search(messages_info_hashtable, (void *) &key, HASH_FIND, &found);
             }
             elem->message_count[j] = elem->message_count[j] + 1;
-            LWLockRelease(AddinShmemInitLock);
         }
     }
 
@@ -282,24 +293,13 @@ _PG_init(void)
                        BGWORKER_BACKEND_DATABASE_CONNECTION;
     /* Start only on master hosts after finishing crash recovery */
     worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
-#if PG_VERSION_NUM < 100000
-    worker.bgw_main = pg_log_errors_main;
-#endif
     snprintf(worker.bgw_name, BGW_MAXLEN, "%s", worker_name);
-#if PG_VERSION_NUM >= 100000
     sprintf(worker.bgw_library_name, "pg_log_errors");
     sprintf(worker.bgw_function_name, "pg_log_errors_main");
-#endif
     /* Wait 10 seconds for restart after crash */
     worker.bgw_restart_time = 10;
     worker.bgw_main_arg = (Datum) 0;
-#if PG_VERSION_NUM >= 90400
-    /*
-     * Notify PID is present since 9.4. If this is not initialized
-     * a static background worker cannot start properly.
-     */
     worker.bgw_notify_pid = 0;
-#endif
     RegisterBackgroundWorker(&worker);
 }
 
@@ -318,7 +318,6 @@ pgss_shmem_startup(void) {
     bool found;
 
     messages_info_hashtable = NULL;
-    LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
 
     HASHCTL ctl;
     memset(&ctl, 0, sizeof(ctl));
@@ -340,21 +339,8 @@ pgss_shmem_startup(void) {
             elem->message_count[j] = 0;
             elem->name = error_names[i];
             MemSet(&(elem->intervals[j]), 0, max_number_of_intervals);
-            elem->prev_sum[j] = 0;
+            elem->sum_in_buffer[j] = 0;
         }
-    }
-    LWLockRelease(AddinShmemInitLock);
-    return;
-}
-
-void
-print_log(char message[], char file_name[], char type[]) {
-    FILE *fptr;
-    fptr = fopen(file_name, type);
-    if (fptr != NULL)
-    {
-        fprintf(fptr,"%s",message);
-        fclose(fptr);
     }
     return;
 }
