@@ -22,6 +22,8 @@ PG_MODULE_MAGIC;
 
 /* Entry point of library loading */
 void _PG_init(void);
+void _PG_fini(void);
+
 /* Shared memory init */
 static void pgss_shmem_startup(void);
 
@@ -109,7 +111,7 @@ pg_log_errors_sighup(SIGNAL_ARGS)
 static void
 pg_log_errors_init()
 {
-    if (current_interval_index == NULL) {
+    if (!current_interval_index) {
         current_interval_index = 0;
     }
     MemSet(&total_messages_at_last_interval, 0, message_types_count);
@@ -119,14 +121,15 @@ pg_log_errors_init()
 static void
 pg_log_errors_update_info()
 {
-    if (messages_info_hashtable == NULL) {
-        return;
-    }
     ErrorCode key;
     MessageInfo *info;
     bool found;
     FILE *file = NULL;
     int message_count;
+
+    if (messages_info_hashtable == NULL) {
+        return;
+    }
 
     file = fopen(file_name, "w");
     if (file == NULL) {
@@ -136,7 +139,8 @@ pg_log_errors_update_info()
                                file_name)));
         return;
     }
-
+    fprintf(file, "{\n\t\"ERRORS_LIST\": {");
+    bool first_time = true;
     for (int j = 0; j < message_types_count; ++j)
     {
         total_messages_at_last_interval[j] = 0;
@@ -146,7 +150,6 @@ pg_log_errors_update_info()
             key.num = error_codes[i];
             info = hash_search(messages_info_hashtable, (void *)&key, HASH_FIND, &found);
             if (!found) {
-                FreeFile(file);
                 return;
             }
             message_count = pg_atomic_read_u32(&info->message_count[j]);
@@ -158,7 +161,11 @@ pg_log_errors_update_info()
             info->intervals[j][current_interval_index] = message_count;
             pg_atomic_write_u32(&info->message_count[j], 0);
             if (info->sum_in_buffer[j] > 0) {
-                fprintf(file, "%s: %s: %d\n",
+                if (!first_time){
+                    fprintf(file, ",");
+                }
+                first_time = false;
+                fprintf(file, "\n\t\t\"%s__%s\": %d",
                         message_type_names[j],
                         info->name,
                         info->sum_in_buffer[j]);
@@ -166,20 +173,18 @@ pg_log_errors_update_info()
         }
 
     }
+    fprintf(file, "\n\t}");
     for (int j = 0; j < message_types_count; ++j)
     {
-        fprintf(file, "%sS at last %ds : %d\n",
+        fprintf(file, ",\n\t\"%sS\": [{\"interval\": %d, \"count\": %d}, {\"interval\": %d, \"count\": %d}]",
                 message_type_names[j],
                 interval / 1000 * intervals_count,
-                total_messages_at_buffer[j]);
-    }
-    for (int j = 0; j < message_types_count; ++j)
-    {
-        fprintf(file, "%sS at last %ds : %d\n",
-                message_type_names[j],
+                total_messages_at_buffer[j],
                 interval / 1000,
-                total_messages_at_last_interval[j]);
+                total_messages_at_last_interval[j]
+                );
     }
+    fprintf(file, "\n}\n");
     fclose(file);
     current_interval_index = (current_interval_index + 1) % intervals_count;
 }
@@ -318,11 +323,14 @@ pgss_shmem_startup(void) {
 
     if (prev_shmem_startup_hook)
         prev_shmem_startup_hook();
+
     bool found;
+    ErrorCode key;
+    MessageInfo *elem;
+    HASHCTL ctl;
 
     messages_info_hashtable = NULL;
 
-    HASHCTL ctl;
     memset(&ctl, 0, sizeof(ctl));
     ctl.keysize = sizeof(ErrorCode);
     ctl.entrysize = sizeof(MessageInfo);
@@ -331,18 +339,13 @@ pgss_shmem_startup(void) {
                               error_types_count, error_types_count,
                               &ctl,
                               HASH_ELEM | HASH_BLOBS);
-    int i;
-    ErrorCode key;
-    MessageInfo *elem;
+
 
     for (int i = 0; i < error_types_count; ++i) {
         key.num = error_codes[i];
         elem = hash_search(messages_info_hashtable, (void *) &key, HASH_ENTER, &found);
         for (int j = 0; j < message_types_count; ++j) {
-            elog(LOG, "poom");
             pg_atomic_init_u32(&elem->message_count[j], 0);
-            elog(LOG, "poom1");
-            // elem->message_count[j] = 0;
             elem->name = error_names[i];
             MemSet(&(elem->intervals[j]), 0, max_number_of_intervals);
             elem->sum_in_buffer[j] = 0;
