@@ -76,7 +76,7 @@ typedef struct hashkey {
 // depends on message_types_count, max_number_of_intervals
 typedef struct message_info {
     ErrorCode key;
-    int message_count[3];
+    pg_atomic_uint32 message_count[3];
     // sum in buffer at previous interval
     int sum_in_buffer[3];
     int intervals[3][120];
@@ -126,6 +126,7 @@ pg_log_errors_update_info()
     MessageInfo *info;
     bool found;
     FILE *file = NULL;
+    int message_count;
 
     file = fopen(file_name, "w");
     if (file == NULL) {
@@ -148,12 +149,14 @@ pg_log_errors_update_info()
                 FreeFile(file);
                 return;
             }
-
-            info->sum_in_buffer[j] = info->sum_in_buffer[j] - info->intervals[j][current_interval_index] + info->message_count[j];
+            message_count = pg_atomic_read_u32(&info->message_count[j]);
+            info->sum_in_buffer[j] = info->sum_in_buffer[j] -
+                    info->intervals[j][current_interval_index] +
+                    message_count;
             total_messages_at_buffer[j] += info->sum_in_buffer[j];
-            total_messages_at_last_interval[j] += info->message_count[j];
-            info->intervals[j][current_interval_index] = info->message_count[j];
-            info->message_count[j] = 0;
+            total_messages_at_last_interval[j] += message_count;
+            info->intervals[j][current_interval_index] = message_count;
+            pg_atomic_write_u32(&info->message_count[j], 0);
             if (info->sum_in_buffer[j] > 0) {
                 fprintf(file, "%s: %s: %d\n",
                         message_type_names[j],
@@ -261,7 +264,7 @@ emit_log_hook_impl(ErrorData *edata)
                 key.num = not_known_error_code;
                 elem = hash_search(messages_info_hashtable, (void *) &key, HASH_FIND, &found);
             }
-            elem->message_count[j] = elem->message_count[j] + 1;
+            pg_atomic_fetch_add_u32(&elem->message_count[j], 1);
         }
     }
 
@@ -336,7 +339,10 @@ pgss_shmem_startup(void) {
         key.num = error_codes[i];
         elem = hash_search(messages_info_hashtable, (void *) &key, HASH_ENTER, &found);
         for (int j = 0; j < message_types_count; ++j) {
-            elem->message_count[j] = 0;
+            elog(LOG, "poom");
+            pg_atomic_init_u32(&elem->message_count[j], 0);
+            elog(LOG, "poom1");
+            // elem->message_count[j] = 0;
             elem->name = error_names[i];
             MemSet(&(elem->intervals[j]), 0, max_number_of_intervals);
             elem->sum_in_buffer[j] = 0;
