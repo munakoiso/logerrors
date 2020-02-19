@@ -34,6 +34,7 @@ void pg_log_errors_main(Datum) pg_attribute_noreturn();
 static volatile sig_atomic_t got_sigterm = false;
 static volatile sig_atomic_t got_sighup = false;
 
+static void pg_log_errors_load_params(void);
 /* GUC variables */
 // one interval in buffer to count messages (ms)
 static int interval = 5000;
@@ -69,7 +70,7 @@ const int max_number_of_intervals = 360;
 // index of current interval in buffer
 static int current_interval_index;
 
-const char file_name[] = "/home/munakoiso/extlog";
+const char *file_name = "/var/log/pg_log_errors";
 
 typedef struct hashkey {
     int num;
@@ -111,6 +112,7 @@ pg_log_errors_sighup(SIGNAL_ARGS)
 static void
 pg_log_errors_init()
 {
+    pg_log_errors_load_params();
     if (!current_interval_index) {
         current_interval_index = 0;
     }
@@ -278,6 +280,44 @@ emit_log_hook_impl(ErrorData *edata)
     }
 }
 
+static void
+pg_log_errors_load_params(void)
+{
+    DefineCustomIntVariable("pg_log_errors.interval",
+                            "Time between writing stat to file (ms).",
+                            "Default of 5s, max of 60s",
+                            &interval,
+                            5000,
+                            1000,
+                            60000,
+                            PGC_SIGHUP,
+                            GUC_UNIT_MS,
+                            NULL,
+                            NULL,
+                            NULL);
+    DefineCustomIntVariable("pg_log_errors.intervals_count",
+                            "Count of intervals in buffer",
+                            "Default of 120, max of 360",
+                            &intervals_count,
+                            120,
+                            2,
+                            360,
+                            PGC_SIGHUP,
+                            GUC_UNIT_MS,
+                            NULL,
+                            NULL,
+                            NULL);
+    DefineCustomStringVariable("pg_log_errors.filename",
+                               "Name of the output file to write stat",
+                               "Default is /var/log/pg_log_errors",
+                               &file_name,
+                               "/var/log/pg_log_errors",
+                               PGC_SIGHUP,
+                               0,
+                               NULL,
+                               NULL,
+                               NULL);
+}
 /*
  * Entry point for worker loading
  */
