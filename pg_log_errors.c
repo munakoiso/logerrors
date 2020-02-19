@@ -159,12 +159,14 @@ pg_log_errors_update_info()
                                file_name)));
         return;
     }
-    fprintf(file, "{\n\t\"ERRORS_LIST\": {");
-    bool first_time = true;
+    fprintf(file, "{\n\t\"MESSAGES\": {");
+
     for (int j = 0; j < message_types_count; ++j)
     {
         total_messages_at_last_interval[j] = 0;
         total_messages_at_buffer[j] = 0;
+        bool first_time = true;
+        fprintf(file, "\n\t\t\"%sS\": {", message_type_names[j]);
         for (int i = 0; i < error_types_count; ++i)
         {
             key.num = error_codes[i];
@@ -185,11 +187,14 @@ pg_log_errors_update_info()
                     fprintf(file, ",");
                 }
                 first_time = false;
-                fprintf(file, "\n\t\t\"%s__%s\": %d",
-                        message_type_names[j],
+                fprintf(file, "\n\t\t\t\"%s\": %d",
                         info->name,
                         info->sum_in_buffer[j]);
             }
+        }
+        fprintf(file, "\n\t\t}", message_type_names[j]);
+        if (j < message_types_count - 1) {
+            fprintf(file, ",");
         }
 
     }
