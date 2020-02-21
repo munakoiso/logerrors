@@ -13,7 +13,3 @@ const int message_types_codes[] = {WARNING, ERROR, FATAL};
 
 //number of time intervals to save in buffer
 const int max_number_of_intervals = 360;
-
-const char *file_name = "/var/log/pg_log_errors";
-const char *temp_prefix = "_temp";
-const int max_length_of_filename = 200;

@@ -102,22 +102,11 @@ void pg_log_errors_main(Datum) pg_attribute_noreturn();
 static void
 pg_log_errors_init()
 {
-    FILE *file = NULL;
     pg_log_errors_load_params();
     global_variables->intervals_count = intervals_count;
     global_variables->interval = interval;
     pg_atomic_init_u32(&global_variables->current_interval_index, 0);
 
-    /* Create file if not exist to prevent error in update step (while deleting file) */
-    file = fopen(file_name, "w");
-    if (file == NULL) {
-        ereport(LOG,
-                (errcode_for_file_access(),
-                        errmsg("could not write file \"%s\": %m",
-                               file_name)));
-    }
-
-    fclose(file);
     MemSet(&total_messages_at_last_interval, 0, message_types_count);
     MemSet(&total_messages_at_buffer, 0, message_types_count);
 }
@@ -128,34 +117,16 @@ pg_log_errors_update_info()
     ErrorCode key;
     MessageInfo *info;
     bool found;
-    FILE *file = NULL;
     int message_count;
-    char temp_filename[max_length_of_filename];
-    bool first_time = true;
 
     if (messages_info_hashtable == NULL || global_variables == NULL) {
         return;
     }
-    strcpy(temp_filename,file_name);
-    strcat(temp_filename,temp_prefix);
-
-    file = fopen(temp_filename, "w");
-
-    if (file == NULL) {
-        ereport(LOG,
-                (errcode_for_file_access(),
-                        errmsg("could not write file \"%s\": %m",
-                               file_name)));
-        return;
-    }
-    fprintf(file, "{\n\t\"MESSAGES\": {");
 
     for (int j = 0; j < message_types_count; ++j)
     {
         total_messages_at_last_interval[j] = 0;
         total_messages_at_buffer[j] = 0;
-        first_time = true;
-        fprintf(file, "\n\t\t\"%sS\": {", message_type_names[j]);
         for (int i = 0; i < error_types_count; ++i)
         {
             key.num = error_codes[i];
@@ -173,43 +144,10 @@ pg_log_errors_update_info()
                                 message_count);
             pg_atomic_write_u32(&info->message_count[j], 0);
 
-            if (info->sum_in_buffer[j] > 0) {
-                if (!first_time){
-                    fprintf(file, ",");
-                }
-                first_time = false;
-                fprintf(file, "\n\t\t\t\"%s\": %d",
-                        info->name,
-                        info->sum_in_buffer[j]);
-            }
         }
-        fprintf(file, "\n\t\t}");
-        if (j < message_types_count - 1) {
-            fprintf(file, ",");
-        }
-
     }
     pg_atomic_write_u32(&global_variables->current_interval_index,
                         (pg_atomic_read_u32(&global_variables->current_interval_index) + 1) % global_variables->intervals_count);
-
-    fprintf(file, "\n\t}");
-    for (int j = 0; j < message_types_count; ++j)
-    {
-        fprintf(file, ",\n\t\"%sS\": [{\"interval\": %d, \"count\": %d}, {\"interval\": %d, \"count\": %d}]",
-                message_type_names[j],
-                global_variables->interval / 1000 * global_variables->intervals_count,
-                total_messages_at_buffer[j],
-                global_variables->interval / 1000,
-                total_messages_at_last_interval[j]
-        );
-    }
-
-
-    fprintf(file, "\n}\n");
-    fclose(file);
-
-    remove(file_name);
-    rename(temp_filename, file_name);
 }
 
 void
@@ -306,7 +244,7 @@ static void
 pg_log_errors_load_params(void)
 {
     DefineCustomIntVariable("pg_log_errors.interval",
-                            "Time between writing stat to file (ms).",
+                            "Time between writing stat to buffer (ms).",
                             "Default of 5s, max of 60s",
                             &interval,
                             5000,
@@ -329,16 +267,6 @@ pg_log_errors_load_params(void)
                             NULL,
                             NULL,
                             NULL);
-    DefineCustomStringVariable("pg_log_errors.filename",
-                               "Name of the output file to write stat",
-                               "Default is /var/log/pg_log_errors",
-                               &file_name,
-                               "/var/log/pg_log_errors",
-                               PGC_SIGHUP,
-                               0,
-                               NULL,
-                               NULL,
-                               NULL);
 }
 /*
  * Entry point for worker loading
