@@ -1,0 +1,5 @@
+# pg_log_errors extension
+comment = 'some comment'
+default_version = '1.0'
+module_pathname = '$libdir/pg_log_errors'
+relocatable = true
