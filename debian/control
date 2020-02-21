@@ -1,0 +1,22 @@
+Source: pg_log_errors
+Section: database
+Priority: extra
+Maintainer: Sviatoslav Ermilin (Yandex.Cloud) <munakoiso@yandex-team.ru>
+Build-Depends: debhelper (>= 9), postgresql-server-dev-all (>= 195~), postgresql-server-dev-10, postgresql-server-dev-11, postgresql-server-dev-12
+Standards-Version: 1.1-0
+Homepage: https://github.yandex-team.ru/munakoiso/pg_log_errors
+
+Package: postgresql-10-pg_log_errors
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, postgresql-10
+Description: Extension for PostgreSQL for collecting statistics about messages in logfile
+
+Package: postgresql-11-pg_log_errors
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, postgresql-11
+Description: Extension for PostgreSQL for collecting statistics about messages in logfile
+
+Package: postgresql-12-pg_log_errors
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, postgresql-12
+Description: Extension for PostgreSQL for collecting statistics about messages in logfile
