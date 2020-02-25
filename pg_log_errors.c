@@ -65,11 +65,13 @@ typedef struct message_info {
     char *name;
 } MessageInfo;
 
+/* Depends on message_types_count */
 typedef struct global_info {
     int interval;
     int intervals_count;
     /* index of current interval in buffer */
     pg_atomic_uint32 current_interval_index;
+    pg_atomic_uint32 total_count[3];
 } GlobalInfo;
 
 static GlobalInfo *global_variables = NULL;
@@ -106,7 +108,7 @@ pg_log_errors_init()
     global_variables->intervals_count = intervals_count;
     global_variables->interval = interval;
     pg_atomic_init_u32(&global_variables->current_interval_index, 0);
-
+    MemSet(&global_variables->total_count, 0, message_types_count);
     MemSet(&total_messages_at_last_interval, 0, message_types_count);
     MemSet(&total_messages_at_buffer, 0, message_types_count);
 }
@@ -216,14 +218,14 @@ emit_log_hook_impl(ErrorData *edata)
     ErrorCode key;
     bool found;
     /* Only if hashtable already inited */
-    if (messages_info_hashtable) {
+    if (messages_info_hashtable != NULL && global_variables != NULL) {
         for (int j = 0; j < message_types_count; ++j)
         {
             /* Only current message type */
             if (edata->elevel != message_types_codes[j]) {
                 continue;
             }
-
+            pg_atomic_fetch_add_u32(&global_variables->total_count[j], 1);
             key.num = edata->sqlerrcode;
             elem = hash_search(messages_info_hashtable, (void *) &key, HASH_FIND, &found);
 
@@ -397,6 +399,24 @@ pg_show_log_errors(PG_FUNCTION_ARGS)
     MemoryContextSwitchTo(oldcontext);
 
     for (int lvl_i = 0; lvl_i < message_types_count; ++lvl_i) {
+
+        /* Add total count to result */
+        MemSet(long_interval_values, 0, sizeof(long_interval_values));
+        MemSet(long_interval_nulls, 0, sizeof(long_interval_nulls));
+        for (int j = 0; j < PG_LOG_ERRORS_COLS; ++j) {
+            long_interval_nulls[j] = false;
+        }
+        /* Time interval */
+        long_interval_nulls[0] = true;
+        /* Type */
+        long_interval_values[1] = CStringGetTextDatum(message_type_names[lvl_i]);
+        /* Message */
+        long_interval_values[2] = CStringGetTextDatum("TOTAL");
+        /* Count */
+        long_interval_values[3] = DatumGetInt32(pg_atomic_read_u32(&global_variables->total_count[lvl_i]));
+        tuplestore_putvalues(tupstore, tupdesc, long_interval_values, long_interval_nulls);
+
+        /* Add specific error count */
         for (int i = 0; i < error_types_count; ++i) {
             MemSet(long_interval_values, 0, sizeof(long_interval_values));
             MemSet(short_interval_values, 0, sizeof(short_interval_values));
