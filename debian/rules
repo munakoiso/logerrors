@@ -1,17 +1,18 @@
 #!/usr/bin/make -f
 
+include /usr/share/postgresql-common/pgxs_debian_control.mk
+
 override_dh_auto_build:
-	+pg_buildext build build-%v
+        +pg_buildext build build-%v
 
 override_dh_auto_test:
-	# nothing to do here, see debian/tests/* instead
+        # nothing to do here, see debian/tests/* instead
 
 override_dh_auto_install:
-	+export PG_SUPPORTED_VERSIONS=installed && pg_buildext install build-%v postgresql-%v-heapcheck
+	+export PG_SUPPORTED_VERSIONS=installed && pg_buildext install build-%v postgresql-%v-log_errors
 
 override_dh_auto_clean:
-	+pg_buildext clean build-%v
-	rm -rf pg_log_errors
+        +pg_buildext clean build-%v
 
 %:
-	dh $@
+        dh $@
