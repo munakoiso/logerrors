@@ -1,4 +1,4 @@
-\echo Use "CREATE EXTENSION pg_log_errors" to load this file. \quit
+\echo Use "CREATE EXTENSION logerrors" to load this file. \quit
 
 CREATE FUNCTION pg_show_log_errors(
     OUT time_interval integer,

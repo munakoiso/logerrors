@@ -34,7 +34,7 @@ static void pgss_shmem_startup(void);
 static volatile sig_atomic_t got_sigterm = false;
 static volatile sig_atomic_t got_sighup = false;
 
-static void pg_log_errors_load_params(void);
+static void logerrors_load_params(void);
 /* GUC variables */
 /* One interval in buffer to count messages (ms) */
 static int interval;
@@ -42,7 +42,7 @@ static int interval;
 static int intervals_count;
 
 /* Worker name */
-static char *worker_name = "pg_log_errors";
+static char *worker_name = "logerrors";
 
 static emit_log_hook_type prev_emit_log_hook = NULL;
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
@@ -79,7 +79,7 @@ static GlobalInfo *global_variables = NULL;
 static HTAB *messages_info_hashtable = NULL;
 
 static void
-pg_log_errors_sigterm(SIGNAL_ARGS)
+logerrors_sigterm(SIGNAL_ARGS)
 {
     int save_errno = errno;
     got_sigterm = true;
@@ -90,7 +90,7 @@ pg_log_errors_sigterm(SIGNAL_ARGS)
 
 
 static void
-pg_log_errors_sighup(SIGNAL_ARGS)
+logerrors_sighup(SIGNAL_ARGS)
 {
     int save_errno = errno;
     got_sighup = true;
@@ -98,13 +98,13 @@ pg_log_errors_sighup(SIGNAL_ARGS)
         SetLatch(&MyProc->procLatch);
     errno = save_errno;
 }
-void pg_log_errors_main(Datum) pg_attribute_noreturn();
+void logerrors_main(Datum) pg_attribute_noreturn();
 
 
 static void
-pg_log_errors_init()
+logerrors_init()
 {
-    pg_log_errors_load_params();
+    logerrors_load_params();
     global_variables->intervals_count = intervals_count;
     global_variables->interval = interval;
     pg_atomic_init_u32(&global_variables->current_interval_index, 0);
@@ -114,7 +114,7 @@ pg_log_errors_init()
 }
 
 static void
-pg_log_errors_update_info()
+logerrors_update_info()
 {
     ErrorCode key;
     MessageInfo *info;
@@ -153,11 +153,11 @@ pg_log_errors_update_info()
 }
 
 void
-pg_log_errors_main(Datum main_arg)
+logerrors_main(Datum main_arg)
 {
     /* Register functions for SIGTERM/SIGHUP management */
-    pqsignal(SIGHUP, pg_log_errors_sighup);
-    pqsignal(SIGTERM, pg_log_errors_sigterm);
+    pqsignal(SIGHUP, logerrors_sighup);
+    pqsignal(SIGTERM, logerrors_sigterm);
 
     /* We're now ready to receive signals */
     BackgroundWorkerUnblockSignals();
@@ -170,7 +170,7 @@ pg_log_errors_main(Datum main_arg)
 #endif
 
     /* Creating table if it does not exist */
-    pg_log_errors_init();
+    logerrors_init();
 
     while (!got_sigterm)
     {
@@ -190,20 +190,20 @@ pg_log_errors_main(Datum main_arg)
             /* Process config file */
             ProcessConfigFile(PGC_SIGHUP);
             got_sighup = false;
-            ereport(DEBUG1, (errmsg("bgworker pg_log_errors signal: processed SIGHUP")));
+            ereport(DEBUG1, (errmsg("bgworker logerrors signal: processed SIGHUP")));
             /* Recreate table if needed */
-            pg_log_errors_init();
+            logerrors_init();
         }
 
         if (got_sigterm)
         {
             /* Simply exit */
-            ereport(DEBUG1, (errmsg("bgworker pg_log_errors signal: processed SIGTERM")));
+            ereport(DEBUG1, (errmsg("bgworker logerrors signal: processed SIGTERM")));
             proc_exit(0);
         }
 
         /* Main work happens here */
-        pg_log_errors_update_info();
+        logerrors_update_info();
     }
 
     /* No problems, so clean exit */
@@ -243,9 +243,9 @@ emit_log_hook_impl(ErrorData *edata)
 }
 
 static void
-pg_log_errors_load_params(void)
+logerrors_load_params(void)
 {
-    DefineCustomIntVariable("pg_log_errors.interval",
+    DefineCustomIntVariable("logerrors.interval",
                             "Time between writing stat to buffer (ms).",
                             "Default of 5s, max of 60s",
                             &interval,
@@ -257,7 +257,7 @@ pg_log_errors_load_params(void)
                             NULL,
                             NULL,
                             NULL);
-    DefineCustomIntVariable("pg_log_errors.intervals_count",
+    DefineCustomIntVariable("logerrors.intervals_count",
                             "Count of intervals in buffer",
                             "Default of 120, max of 360",
                             &intervals_count,
@@ -292,8 +292,8 @@ _PG_init(void)
     /* Start only on master hosts after finishing crash recovery */
     worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
     snprintf(worker.bgw_name, BGW_MAXLEN, "%s", worker_name);
-    sprintf(worker.bgw_library_name, "pg_log_errors");
-    sprintf(worker.bgw_function_name, "pg_log_errors_main");
+    sprintf(worker.bgw_library_name, "logerrors");
+    sprintf(worker.bgw_function_name, "logerrors_main");
     /* Wait 10 seconds for restart after crash */
     worker.bgw_restart_time = 10;
     worker.bgw_main_arg = (Datum) 0;
@@ -324,11 +324,11 @@ pgss_shmem_startup(void) {
     ctl.keysize = sizeof(ErrorCode);
     ctl.entrysize = sizeof(MessageInfo);
 
-    messages_info_hashtable = ShmemInitHash("pg_log_errors hash",
+    messages_info_hashtable = ShmemInitHash("logerrors hash",
                                             error_types_count, error_types_count,
                                             &ctl,
                                             HASH_ELEM | HASH_BLOBS);
-    global_variables = ShmemInitStruct("pg_log_errors global_variables",
+    global_variables = ShmemInitStruct("logerrors global_variables",
                                        sizeof(GlobalInfo),
                                        &found);
     for (int i = 0; i < error_types_count; ++i) {
@@ -349,7 +349,7 @@ PG_FUNCTION_INFO_V1(pg_show_log_errors);
 Datum
 pg_show_log_errors(PG_FUNCTION_ARGS)
 {
-#define PG_LOG_ERRORS_COLS	4
+#define logerrors_COLS	4
     ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
     TupleDesc	tupdesc;
     Tuplestorestate *tupstore;
@@ -358,11 +358,11 @@ pg_show_log_errors(PG_FUNCTION_ARGS)
     ErrorCode key;
     MessageInfo *info;
 
-    Datum long_interval_values[PG_LOG_ERRORS_COLS];
-    Datum short_interval_values[PG_LOG_ERRORS_COLS];
+    Datum long_interval_values[logerrors_COLS];
+    Datum short_interval_values[logerrors_COLS];
 
-    bool long_interval_nulls[PG_LOG_ERRORS_COLS];
-    bool short_interval_nulls[PG_LOG_ERRORS_COLS];
+    bool long_interval_nulls[logerrors_COLS];
+    bool short_interval_nulls[logerrors_COLS];
     bool found;
     int short_interval;
     int long_interval;
@@ -403,7 +403,7 @@ pg_show_log_errors(PG_FUNCTION_ARGS)
         /* Add total count to result */
         MemSet(long_interval_values, 0, sizeof(long_interval_values));
         MemSet(long_interval_nulls, 0, sizeof(long_interval_nulls));
-        for (int j = 0; j < PG_LOG_ERRORS_COLS; ++j) {
+        for (int j = 0; j < logerrors_COLS; ++j) {
             long_interval_nulls[j] = false;
         }
         /* Time interval */
@@ -422,7 +422,7 @@ pg_show_log_errors(PG_FUNCTION_ARGS)
             MemSet(short_interval_values, 0, sizeof(short_interval_values));
             MemSet(long_interval_nulls, 0, sizeof(long_interval_nulls));
             MemSet(short_interval_nulls, 0, sizeof(short_interval_nulls));
-            for (int j = 0; j < PG_LOG_ERRORS_COLS; ++j) {
+            for (int j = 0; j < logerrors_COLS; ++j) {
                 long_interval_nulls[j] = false;
                 short_interval_nulls[j] = false;
             }
