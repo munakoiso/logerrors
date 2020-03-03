@@ -120,11 +120,9 @@ logerrors_update_info()
     MessageInfo *info;
     bool found;
     int message_count;
-
     if (messages_info_hashtable == NULL || global_variables == NULL) {
         return;
     }
-
     for (int j = 0; j < message_types_count; ++j)
     {
         total_messages_at_last_interval[j] = 0;
@@ -162,16 +160,7 @@ logerrors_main(Datum main_arg)
     /* We're now ready to receive signals */
     BackgroundWorkerUnblockSignals();
 
-    /* Connect to a database */
-#if PG_VERSION_NUM < 110000
-    BackgroundWorkerInitializeConnection("postgres", NULL);
-#else
-    BackgroundWorkerInitializeConnection("postgres", NULL, 0);
-#endif
-
-    /* Creating table if it does not exist */
     logerrors_init();
-
     while (!got_sigterm)
     {
         int rc;
@@ -183,7 +172,6 @@ logerrors_main(Datum main_arg)
         /* Emergency bailout if postmaster has died */
         if (rc & WL_POSTMASTER_DEATH)
             proc_exit(1);
-
         /* Process signals */
         if (got_sighup)
         {
@@ -194,14 +182,12 @@ logerrors_main(Datum main_arg)
             /* Recreate table if needed */
             logerrors_init();
         }
-
         if (got_sigterm)
         {
             /* Simply exit */
-            ereport(DEBUG1, (errmsg("bgworker logerrors signal: processed SIGTERM")));
+            elog(DEBUG1, "bgworker logerrors signal: processed SIGTERM");
             proc_exit(0);
         }
-
         /* Main work happens here */
         logerrors_update_info();
     }
@@ -225,6 +211,7 @@ emit_log_hook_impl(ErrorData *edata)
             if (edata->elevel != message_types_codes[j]) {
                 continue;
             }
+
             pg_atomic_fetch_add_u32(&global_variables->total_count[j], 1);
             key.num = edata->sqlerrcode;
             elem = hash_search(messages_info_hashtable, (void *) &key, HASH_FIND, &found);
@@ -234,6 +221,7 @@ emit_log_hook_impl(ErrorData *edata)
                 elem = hash_search(messages_info_hashtable, (void *) &key, HASH_FIND, &found);
             }
             pg_atomic_fetch_add_u32(&elem->message_count[j], 1);
+
         }
     }
 
@@ -269,6 +257,7 @@ logerrors_load_params(void)
                             NULL,
                             NULL,
                             NULL);
+
 }
 /*
  * Entry point for worker loading
@@ -276,19 +265,18 @@ logerrors_load_params(void)
 void
 _PG_init(void)
 {
-    if (! process_shared_preload_libraries_in_progress) {
+    if (!process_shared_preload_libraries_in_progress) {
         return;
     }
     prev_shmem_startup_hook = shmem_startup_hook;
     shmem_startup_hook = pgss_shmem_startup;
     prev_emit_log_hook = emit_log_hook;
     emit_log_hook = emit_log_hook_impl;
-    RequestAddinShmemSpace(sizeof(MessageInfo) * error_types_count);
+    RequestAddinShmemSpace(sizeof(MessageInfo) * error_types_count + sizeof(GlobalInfo));
     BackgroundWorker worker;
     /* Worker parameter and registration */
     MemSet(&worker, 0, sizeof(BackgroundWorker));
-    worker.bgw_flags = BGWORKER_SHMEM_ACCESS |
-                       BGWORKER_BACKEND_DATABASE_CONNECTION;
+    worker.bgw_flags = BGWORKER_SHMEM_ACCESS;
     /* Start only on master hosts after finishing crash recovery */
     worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
     snprintf(worker.bgw_name, BGW_MAXLEN, "%s", worker_name);
@@ -310,20 +298,17 @@ _PG_fini(void)
 
 static void
 pgss_shmem_startup(void) {
-
     bool found;
     ErrorCode key;
     MessageInfo *elem;
     HASHCTL ctl;
     if (prev_shmem_startup_hook)
         prev_shmem_startup_hook();
-
     messages_info_hashtable = NULL;
     global_variables = NULL;
     memset(&ctl, 0, sizeof(ctl));
     ctl.keysize = sizeof(ErrorCode);
     ctl.entrysize = sizeof(MessageInfo);
-
     messages_info_hashtable = ShmemInitHash("logerrors hash",
                                             error_types_count, error_types_count,
                                             &ctl,
