@@ -37,9 +37,9 @@ static volatile sig_atomic_t got_sighup = false;
 static void logerrors_load_params(void);
 /* GUC variables */
 /* One interval in buffer to count messages (ms) */
-static int interval;
+static int interval = 5000;
 /* While that count of intervals messages doesn't dropping from statistic */
-static int intervals_count;
+static int intervals_count = 120;
 
 /* Worker name */
 static char *worker_name = "logerrors";
