@@ -28,11 +28,11 @@ void _PG_init(void);
 void _PG_fini(void);
 
 /* Shared memory init */
+static void pgss_shmem_shutdown(int code, Datum arg);
 static void pgss_shmem_startup(void);
 
 /* Signal handling */
 static volatile sig_atomic_t got_sigterm = false;
-static volatile sig_atomic_t got_sighup = false;
 
 static void logerrors_load_params(void);
 /* GUC variables */
@@ -88,23 +88,26 @@ logerrors_sigterm(SIGNAL_ARGS)
     errno = save_errno;
 }
 
-
-static void
-logerrors_sighup(SIGNAL_ARGS)
-{
-    int save_errno = errno;
-    got_sighup = true;
-    if (MyProc)
-        SetLatch(&MyProc->procLatch);
-    errno = save_errno;
-}
 void logerrors_main(Datum) pg_attribute_noreturn();
-
 
 static void
 logerrors_init()
 {
-    logerrors_load_params();
+    bool found;
+    ErrorCode key;
+    MessageInfo *elem;
+    for (int i = 0; i < error_types_count; ++i) {
+        key.num = error_codes[i];
+        elem = hash_search(messages_info_hashtable, (void *) &key, HASH_ENTER, &found);
+        if (found)
+            continue;
+        for (int j = 0; j < message_types_count; ++j) {
+            pg_atomic_init_u32(&elem->message_count[j], 0);
+            elem->name = error_names[i];
+            MemSet(&(elem->intervals[j]), 0, max_number_of_intervals);
+            elem->sum_in_buffer[j] = 0;
+        }
+    }
     global_variables->intervals_count = intervals_count;
     global_variables->interval = interval;
     pg_atomic_init_u32(&global_variables->current_interval_index, 0);
@@ -131,9 +134,6 @@ logerrors_update_info()
         {
             key.num = error_codes[i];
             info = hash_search(messages_info_hashtable, (void *)&key, HASH_FIND, &found);
-            if (!found) {
-                return;
-            }
             message_count = pg_atomic_read_u32(&info->message_count[j]);
             info->sum_in_buffer[j] = info->sum_in_buffer[j] -
                                      pg_atomic_read_u32(&info->intervals[j][pg_atomic_read_u32(&global_variables->current_interval_index)]) +
@@ -153,8 +153,7 @@ logerrors_update_info()
 void
 logerrors_main(Datum main_arg)
 {
-    /* Register functions for SIGTERM/SIGHUP management */
-    pqsignal(SIGHUP, logerrors_sighup);
+    /* Register functions for SIGTERM management */
     pqsignal(SIGTERM, logerrors_sigterm);
 
     /* We're now ready to receive signals */
@@ -173,15 +172,7 @@ logerrors_main(Datum main_arg)
         if (rc & WL_POSTMASTER_DEATH)
             proc_exit(1);
         /* Process signals */
-        if (got_sighup)
-        {
-            /* Process config file */
-            ProcessConfigFile(PGC_SIGHUP);
-            got_sighup = false;
-            ereport(DEBUG1, (errmsg("bgworker logerrors signal: processed SIGHUP")));
-            /* Recreate table if needed */
-            logerrors_init();
-        }
+
         if (got_sigterm)
         {
             /* Simply exit */
@@ -198,30 +189,28 @@ logerrors_main(Datum main_arg)
 
 /* Log hook */
 void
-emit_log_hook_impl(ErrorData *edata)
+logerrors_emit_log_hook(ErrorData *edata)
 {
     MessageInfo *elem;
     ErrorCode key;
     bool found;
     /* Only if hashtable already inited */
-    if (messages_info_hashtable != NULL && global_variables != NULL) {
+    if (messages_info_hashtable != NULL && global_variables != NULL && MyProc != NULL && !proc_exit_inprogress) {
         for (int j = 0; j < message_types_count; ++j)
         {
             /* Only current message type */
             if (edata->elevel != message_types_codes[j]) {
                 continue;
             }
-
-            pg_atomic_fetch_add_u32(&global_variables->total_count[j], 1);
             key.num = edata->sqlerrcode;
             elem = hash_search(messages_info_hashtable, (void *) &key, HASH_FIND, &found);
-
             if (!found) {
+                elog(LOG, "logerrors_emit_log_hook not known error code");
                 key.num = not_known_error_code;
                 elem = hash_search(messages_info_hashtable, (void *) &key, HASH_FIND, &found);
             }
             pg_atomic_fetch_add_u32(&elem->message_count[j], 1);
-
+            pg_atomic_fetch_add_u32(&global_variables->total_count[j], 1);
         }
     }
 
@@ -240,8 +229,8 @@ logerrors_load_params(void)
                             5000,
                             1000,
                             60000,
-                            PGC_SIGHUP,
-                            GUC_UNIT_MS,
+                            PGC_SUSET,
+                            GUC_UNIT_MS | GUC_NO_RESET_ALL,
                             NULL,
                             NULL,
                             NULL);
@@ -252,12 +241,11 @@ logerrors_load_params(void)
                             120,
                             2,
                             360,
-                            PGC_SIGHUP,
-                            GUC_UNIT_MS,
+                            PGC_SUSET,
+                            GUC_NO_RESET_ALL,
                             NULL,
                             NULL,
                             NULL);
-
 }
 /*
  * Entry point for worker loading
@@ -271,7 +259,7 @@ _PG_init(void)
     prev_shmem_startup_hook = shmem_startup_hook;
     shmem_startup_hook = pgss_shmem_startup;
     prev_emit_log_hook = emit_log_hook;
-    emit_log_hook = emit_log_hook_impl;
+    emit_log_hook = logerrors_emit_log_hook;
     RequestAddinShmemSpace(sizeof(MessageInfo) * error_types_count + sizeof(GlobalInfo));
     BackgroundWorker worker;
     /* Worker parameter and registration */
@@ -287,6 +275,7 @@ _PG_init(void)
     worker.bgw_main_arg = (Datum) 0;
     worker.bgw_notify_pid = 0;
     RegisterBackgroundWorker(&worker);
+    logerrors_load_params();
 }
 
 void
@@ -316,16 +305,8 @@ pgss_shmem_startup(void) {
     global_variables = ShmemInitStruct("logerrors global_variables",
                                        sizeof(GlobalInfo),
                                        &found);
-    for (int i = 0; i < error_types_count; ++i) {
-        key.num = error_codes[i];
-        elem = hash_search(messages_info_hashtable, (void *) &key, HASH_ENTER, &found);
-        for (int j = 0; j < message_types_count; ++j) {
-            pg_atomic_init_u32(&elem->message_count[j], 0);
-            elem->name = error_names[i];
-            MemSet(&(elem->intervals[j]), 0, max_number_of_intervals);
-            elem->sum_in_buffer[j] = 0;
-        }
-    }
+    if (!IsUnderPostmaster)
+        logerrors_init();
     return;
 }
 
@@ -355,7 +336,7 @@ pg_show_log_errors(PG_FUNCTION_ARGS)
     int errors_in_long_interval;
     int errors_in_short_interval;
     /* Shmem structs not ready yet */
-    if (messages_info_hashtable == NULL) {
+    if (messages_info_hashtable == NULL || global_variables == NULL) {
         return (Datum) 0;
     }
     /* check to see if caller supports us returning a tuplestore */
@@ -448,9 +429,7 @@ pg_show_log_errors(PG_FUNCTION_ARGS)
             }
         }
     }
-
     /* return the tuplestore */
     tuplestore_donestoring(tupstore);
-
     return (Datum) 0;
 }
