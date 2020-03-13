@@ -2,17 +2,6 @@ Extension for PostgreSQL for collecting statistics about messages in logfile
 
 ## Install
 
-Do the following commands where PATH for PostgreSQL commands of the target
-server is set.
-
-    $ cd logerrors
-    $ USE_PGXS=1 make
-    $ sudo USE_PGXS=1 make install
-
-Add to your postgresql.conf following line:
-
-	$ shared_preload_libraries = 'logerrors'
-
 Run psql command:
 
     $ CREATE EXTENSION logerrors;
