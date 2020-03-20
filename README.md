@@ -8,10 +8,10 @@ Run psql command:
 
 ## Usage
 
-   After creating extension you can call pg_show_log_errors function in psql(without any arguments)
+   After creating extension you can call pg_log_errors_stats function in psql(without any arguments)
 
 ```
-    postgres=# select * from pg_show_log_errors();
+    postgres=# select * from pg_log_errors_stats();
      time_interval |  type   |       message        | count
     ---------------+---------+----------------------+-------
                    | WARNING | TOTAL                |     0
@@ -26,3 +26,9 @@ In output you can see 4 columns:
     type: postgresql type of message (now supports only these: warning, error, fatal).
     message: code of message from log_hook. (or 'TOTAL' for total count of that type messages)
     count: count of massages of this type at this time_interval in log.
+
+
+To reset all statistics use
+```
+    postgres=# select pg_log_errors_reset();
+```

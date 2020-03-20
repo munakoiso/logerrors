@@ -18,7 +18,7 @@
 #include "utils/builtins.h"
 #include "funcapi.h"
 
-#include "constants.c"
+#include "constants.h"
 
 /* Allow load of this module in shared libs */
 PG_MODULE_MAGIC;
@@ -46,10 +46,6 @@ static char *worker_name = "logerrors";
 
 static emit_log_hook_type prev_emit_log_hook = NULL;
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
-
-/* counters of messages (depends on message_types_count) */
-static int total_messages_at_last_interval[3];
-static int total_messages_at_buffer[3];
 
 typedef struct hashkey {
     int num;
@@ -91,6 +87,13 @@ logerrors_sigterm(SIGNAL_ARGS)
 void logerrors_main(Datum) pg_attribute_noreturn();
 
 static void
+global_variables_init()
+{
+    global_variables->intervals_count = intervals_count;
+    global_variables->interval = interval;
+}
+
+static void
 logerrors_init()
 {
     bool found;
@@ -99,8 +102,6 @@ logerrors_init()
     for (int i = 0; i < error_types_count; ++i) {
         key.num = error_codes[i];
         elem = hash_search(messages_info_hashtable, (void *) &key, HASH_ENTER, &found);
-        if (found)
-            continue;
         for (int j = 0; j < message_types_count; ++j) {
             pg_atomic_init_u32(&elem->message_count[j], 0);
             elem->name = error_names[i];
@@ -108,12 +109,11 @@ logerrors_init()
             elem->sum_in_buffer[j] = 0;
         }
     }
-    global_variables->intervals_count = intervals_count;
-    global_variables->interval = interval;
     pg_atomic_init_u32(&global_variables->current_interval_index, 0);
     MemSet(&global_variables->total_count, 0, message_types_count);
-    MemSet(&total_messages_at_last_interval, 0, message_types_count);
-    MemSet(&total_messages_at_buffer, 0, message_types_count);
+    for (int i = 0; i < message_types_count; ++i) {
+        pg_atomic_init_u32(&global_variables->total_count[i], 0);
+    }
 }
 
 static void
@@ -128,8 +128,6 @@ logerrors_update_info()
     }
     for (int j = 0; j < message_types_count; ++j)
     {
-        total_messages_at_last_interval[j] = 0;
-        total_messages_at_buffer[j] = 0;
         for (int i = 0; i < error_types_count; ++i)
         {
             key.num = error_codes[i];
@@ -138,8 +136,6 @@ logerrors_update_info()
             info->sum_in_buffer[j] = info->sum_in_buffer[j] -
                                      pg_atomic_read_u32(&info->intervals[j][pg_atomic_read_u32(&global_variables->current_interval_index)]) +
                                      message_count;
-            total_messages_at_buffer[j] += info->sum_in_buffer[j];
-            total_messages_at_last_interval[j] += message_count;
             pg_atomic_write_u32(&info->intervals[j][pg_atomic_read_u32(&global_variables->current_interval_index)],
                                 message_count);
             pg_atomic_write_u32(&info->message_count[j], 0);
@@ -306,14 +302,15 @@ pgss_shmem_startup(void) {
                                        sizeof(GlobalInfo),
                                        &found);
     if (!IsUnderPostmaster)
+        global_variables_init();
         logerrors_init();
     return;
 }
 
-PG_FUNCTION_INFO_V1(pg_show_log_errors);
+PG_FUNCTION_INFO_V1(pg_log_errors_stats);
 
 Datum
-pg_show_log_errors(PG_FUNCTION_ARGS)
+pg_log_errors_stats(PG_FUNCTION_ARGS)
 {
 #define logerrors_COLS	4
     ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
@@ -432,4 +429,14 @@ pg_show_log_errors(PG_FUNCTION_ARGS)
     /* return the tuplestore */
     tuplestore_donestoring(tupstore);
     return (Datum) 0;
+}
+
+PG_FUNCTION_INFO_V1(pg_log_errors_reset);
+
+Datum
+pg_log_errors_reset(PG_FUNCTION_ARGS) {
+
+    logerrors_init();
+
+    PG_RETURN_VOID();
 }
