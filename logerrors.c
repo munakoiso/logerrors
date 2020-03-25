@@ -334,7 +334,9 @@ pg_log_errors_stats(PG_FUNCTION_ARGS)
     int errors_in_short_interval;
     /* Shmem structs not ready yet */
     if (messages_info_hashtable == NULL || global_variables == NULL) {
-        return (Datum) 0;
+        ereport(ERROR,
+                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                        errmsg("logerrors must be loaded via shared_preload_libraries")));
     }
     /* check to see if caller supports us returning a tuplestore */
     if (rsinfo == NULL || !IsA(rsinfo, ReturnSetInfo))
@@ -435,6 +437,12 @@ PG_FUNCTION_INFO_V1(pg_log_errors_reset);
 
 Datum
 pg_log_errors_reset(PG_FUNCTION_ARGS) {
+
+    if (messages_info_hashtable == NULL || global_variables == NULL) {
+        ereport(ERROR,
+                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                        errmsg("logerrors must be loaded via shared_preload_libraries")));
+    }
 
     logerrors_init();
 
