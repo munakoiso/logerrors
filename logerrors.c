@@ -201,7 +201,7 @@ logerrors_emit_log_hook(ErrorData *edata)
             key.num = edata->sqlerrcode;
             elem = hash_search(messages_info_hashtable, (void *) &key, HASH_FIND, &found);
             if (!found) {
-                elog(LOG, "logerrors_emit_log_hook not known error code");
+                elog(LOG, "logerrors_emit_log_hook not known error code %d", edata->sqlerrcode);
                 key.num = not_known_error_code;
                 elem = hash_search(messages_info_hashtable, (void *) &key, HASH_FIND, &found);
             }
