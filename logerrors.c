@@ -113,10 +113,12 @@ logerrors_init()
     bool found;
     ErrorCode key;
     MessageInfo *elem;
-    for (int i = 0; i < error_types_count; ++i) {
+    int i;
+    int j;
+    for (i = 0; i < error_types_count; ++i) {
         key.num = error_codes[i];
         elem = hash_search(messages_info_hashtable, (void *) &key, HASH_ENTER, &found);
-        for (int j = 0; j < message_types_count; ++j) {
+        for (j = 0; j < message_types_count; ++j) {
             pg_atomic_init_u32(&elem->message_count[j], 0);
             elem->name = (char*)error_names[i];
             MemSet(&(elem->intervals[j]), 0, max_number_of_intervals);
@@ -125,7 +127,7 @@ logerrors_init()
     }
     pg_atomic_init_u32(&global_variables->current_interval_index, 0);
     MemSet(&global_variables->total_count, 0, message_types_count);
-    for (int i = 0; i < message_types_count; ++i) {
+    for (i = 0; i < message_types_count; ++i) {
         pg_atomic_init_u32(&global_variables->total_count[i], 0);
     }
     slow_log_info_init();
@@ -137,13 +139,15 @@ logerrors_update_info()
     ErrorCode key;
     MessageInfo *info;
     bool found;
+    int i;
+    int j;
     int message_count;
     if (messages_info_hashtable == NULL || global_variables == NULL) {
         return;
     }
-    for (int j = 0; j < message_types_count; ++j)
+    for (j = 0; j < message_types_count; ++j)
     {
-        for (int i = 0; i < error_types_count; ++i)
+        for (i = 0; i < error_types_count; ++i)
         {
             key.num = error_codes[i];
             info = hash_search(messages_info_hashtable, (void *)&key, HASH_FIND, &found);
@@ -205,9 +209,10 @@ logerrors_emit_log_hook(ErrorData *edata)
     MessageInfo *elem;
     ErrorCode key;
     bool found;
+    int j;
     /* Only if hashtable already inited */
     if (messages_info_hashtable != NULL && global_variables != NULL && MyProc != NULL && !proc_exit_inprogress) {
-        for (int j = 0; j < message_types_count; ++j)
+        for (j = 0; j < message_types_count; ++j)
         {
             /* Only current message type */
             if (edata->elevel != message_types_codes[j]) {
@@ -349,6 +354,9 @@ pg_log_errors_stats(PG_FUNCTION_ARGS)
     int prev_interval_index;
     int errors_in_long_interval;
     int errors_in_short_interval;
+    int lvl_i;
+    int i;
+    int j;
     /* Shmem structs not ready yet */
     if (messages_info_hashtable == NULL || global_variables == NULL) {
         ereport(ERROR,
@@ -380,12 +388,12 @@ pg_log_errors_stats(PG_FUNCTION_ARGS)
     rsinfo->setDesc = tupdesc;
     MemoryContextSwitchTo(oldcontext);
 
-    for (int lvl_i = 0; lvl_i < message_types_count; ++lvl_i) {
+    for (lvl_i = 0; lvl_i < message_types_count; ++lvl_i) {
 
         /* Add total count to result */
         MemSet(long_interval_values, 0, sizeof(long_interval_values));
         MemSet(long_interval_nulls, 0, sizeof(long_interval_nulls));
-        for (int j = 0; j < logerrors_COLS; ++j) {
+        for (j = 0; j < logerrors_COLS; ++j) {
             long_interval_nulls[j] = false;
         }
         /* Time interval */
@@ -399,12 +407,12 @@ pg_log_errors_stats(PG_FUNCTION_ARGS)
         tuplestore_putvalues(tupstore, tupdesc, long_interval_values, long_interval_nulls);
 
         /* Add specific error count */
-        for (int i = 0; i < error_types_count; ++i) {
+        for (i = 0; i < error_types_count; ++i) {
             MemSet(long_interval_values, 0, sizeof(long_interval_values));
             MemSet(short_interval_values, 0, sizeof(short_interval_values));
             MemSet(long_interval_nulls, 0, sizeof(long_interval_nulls));
             MemSet(short_interval_nulls, 0, sizeof(short_interval_nulls));
-            for (int j = 0; j < logerrors_COLS; ++j) {
+            for (j = 0; j < logerrors_COLS; ++j) {
                 long_interval_nulls[j] = false;
                 short_interval_nulls[j] = false;
             }
@@ -477,6 +485,7 @@ pg_slow_log_stats(PG_FUNCTION_ARGS)
     TupleDesc tupdesc;
     MemoryContext per_query_ctx;
     MemoryContext oldcontext;
+    int i;
 
     Datum result_values[SLOW_LOG_COLS];
     bool result_nulls[SLOW_LOG_COLS];
@@ -512,7 +521,7 @@ pg_slow_log_stats(PG_FUNCTION_ARGS)
 
     MemSet(result_values, 0, sizeof(result_values));
     MemSet(result_nulls, 0, sizeof(result_nulls));
-    for (int i = 0; i < SLOW_LOG_COLS; i++) {
+    for (i = 0; i < SLOW_LOG_COLS; i++) {
         result_nulls[i] = false;
     }
     result_values[0] = DatumGetInt32(pg_atomic_read_u32(&global_variables->slow_log_info.count));
