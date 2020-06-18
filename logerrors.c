@@ -28,7 +28,6 @@ void _PG_init(void);
 void _PG_fini(void);
 
 /* Shared memory init */
-static void pgss_shmem_shutdown(int code, Datum arg);
 static void pgss_shmem_startup(void);
 
 /* Signal handling */
@@ -61,6 +60,11 @@ typedef struct message_info {
     char *name;
 } MessageInfo;
 
+typedef struct slow_log_info {
+    pg_atomic_uint32 count;
+    pg_atomic_uint64 reset_time;
+} SlowLogInfo;
+
 /* Depends on message_types_count */
 typedef struct global_info {
     int interval;
@@ -68,11 +72,14 @@ typedef struct global_info {
     /* index of current interval in buffer */
     pg_atomic_uint32 current_interval_index;
     pg_atomic_uint32 total_count[3];
+    SlowLogInfo slow_log_info;
 } GlobalInfo;
 
 static GlobalInfo *global_variables = NULL;
 
 static HTAB *messages_info_hashtable = NULL;
+
+void logerrors_emit_log_hook(ErrorData *edata);
 
 static void
 logerrors_sigterm(SIGNAL_ARGS)
@@ -94,6 +101,13 @@ global_variables_init()
 }
 
 static void
+slow_log_info_init()
+{
+    pg_atomic_init_u32(&global_variables->slow_log_info.count, 0);
+    pg_atomic_init_u64(&global_variables->slow_log_info.reset_time, GetCurrentTimestamp());
+}
+
+static void
 logerrors_init()
 {
     bool found;
@@ -104,7 +118,7 @@ logerrors_init()
         elem = hash_search(messages_info_hashtable, (void *) &key, HASH_ENTER, &found);
         for (int j = 0; j < message_types_count; ++j) {
             pg_atomic_init_u32(&elem->message_count[j], 0);
-            elem->name = error_names[i];
+            elem->name = (char*)error_names[i];
             MemSet(&(elem->intervals[j]), 0, max_number_of_intervals);
             elem->sum_in_buffer[j] = 0;
         }
@@ -114,6 +128,7 @@ logerrors_init()
     for (int i = 0; i < message_types_count; ++i) {
         pg_atomic_init_u32(&global_variables->total_count[i], 0);
     }
+    slow_log_info_init();
 }
 
 static void
@@ -208,6 +223,10 @@ logerrors_emit_log_hook(ErrorData *edata)
             pg_atomic_fetch_add_u32(&elem->message_count[j], 1);
             pg_atomic_fetch_add_u32(&global_variables->total_count[j], 1);
         }
+        if (edata && edata->message && strstr(edata->message, "duration:"))
+        {
+            pg_atomic_fetch_add_u32(&global_variables->slow_log_info.count, 1);
+        }
     }
 
     if (prev_emit_log_hook) {
@@ -249,6 +268,7 @@ logerrors_load_params(void)
 void
 _PG_init(void)
 {
+    BackgroundWorker worker;
     if (!process_shared_preload_libraries_in_progress) {
         return;
     }
@@ -257,7 +277,6 @@ _PG_init(void)
     prev_emit_log_hook = emit_log_hook;
     emit_log_hook = logerrors_emit_log_hook;
     RequestAddinShmemSpace(sizeof(MessageInfo) * error_types_count + sizeof(GlobalInfo));
-    BackgroundWorker worker;
     /* Worker parameter and registration */
     MemSet(&worker, 0, sizeof(BackgroundWorker));
     worker.bgw_flags = BGWORKER_SHMEM_ACCESS;
@@ -284,8 +303,6 @@ _PG_fini(void)
 static void
 pgss_shmem_startup(void) {
     bool found;
-    ErrorCode key;
-    MessageInfo *elem;
     HASHCTL ctl;
     if (prev_shmem_startup_hook)
         prev_shmem_startup_hook();
@@ -447,4 +464,62 @@ pg_log_errors_reset(PG_FUNCTION_ARGS) {
     logerrors_init();
 
     PG_RETURN_VOID();
+}
+
+PG_FUNCTION_INFO_V1(pg_slow_log_stats);
+
+Datum
+pg_slow_log_stats(PG_FUNCTION_ARGS)
+{
+#define SLOW_LOG_COLS 2
+    ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+    Tuplestorestate *tupstore;
+    TupleDesc tupdesc;
+    MemoryContext per_query_ctx;
+    MemoryContext oldcontext;
+
+    Datum result_values[SLOW_LOG_COLS];
+    bool result_nulls[SLOW_LOG_COLS];
+
+    /* Shmem structs not ready yet */
+    if (global_variables == NULL) {
+        return (Datum) 0;
+    }
+    /* check to see if caller supports us returning a tuplestore */
+    if (rsinfo == NULL || !IsA(rsinfo, ReturnSetInfo))
+        ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                        errmsg("set-valued function called in context that cannot accept a set")));
+    if (!(rsinfo->allowedModes & SFRM_Materialize))
+        ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                        errmsg("materialize mode required, but it is not allowed in this context")));
+
+    /* Build a tuple descriptor for our result type */
+    if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+        ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                        errmsg("return type must be a row type")));
+
+    per_query_ctx = rsinfo->econtext->ecxt_per_query_memory;
+    oldcontext = MemoryContextSwitchTo(per_query_ctx);
+
+    tupstore = tuplestore_begin_heap(true, false, work_mem);
+    rsinfo->returnMode = SFRM_Materialize;
+    rsinfo->setResult = tupstore;
+    rsinfo->setDesc = tupdesc;
+    MemoryContextSwitchTo(oldcontext);
+
+    MemSet(result_values, 0, sizeof(result_values));
+    MemSet(result_nulls, 0, sizeof(result_nulls));
+    for (int i = 0; i < SLOW_LOG_COLS; i++) {
+        result_nulls[i] = false;
+    }
+    result_values[0] = DatumGetInt32(pg_atomic_read_u32(&global_variables->slow_log_info.count));
+    result_values[1] = DatumGetTimestamp(pg_atomic_read_u64(&global_variables->slow_log_info.reset_time));
+
+    tuplestore_putvalues(tupstore, tupdesc, result_values, result_nulls);
+    /* return the tuplestore */
+    tuplestore_donestoring(tupstore);
+    return (Datum) 0;
 }
