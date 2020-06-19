@@ -1,5 +1,5 @@
 # logerrors extension
 comment = 'Function for collecting statistics about messages in logfile'
-default_version = '1.0'
+default_version = '1.1'
 module_pathname = '$libdir/logerrors'
 relocatable = true
