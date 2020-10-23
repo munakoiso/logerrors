@@ -589,6 +589,8 @@ pg_log_errors_stats(PG_FUNCTION_ARGS)
     /* long interval counters */
     put_values_to_tuple(current_interval_index, global_variables->intervals_count, counters_hashtable, tupdesc,
             tupstore);
+    /* clean up */
+    hash_destroy(counters_hashtable);
     /* return the tuplestore */
     tuplestore_donestoring(tupstore);
     return (Datum) 0;
