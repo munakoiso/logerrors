@@ -18,6 +18,14 @@
 #include "utils/builtins.h"
 #include "funcapi.h"
 
+#include "libpq/libpq.h"
+#include "libpq/pqformat.h"
+
+#include "catalog/pg_authid.h"
+#include "utils/syscache.h"
+#include "access/htup_details.h"
+#include "commands/dbcommands.h"
+
 #include "constants.h"
 
 /* Allow load of this module in shared libs */
@@ -46,38 +54,56 @@ static char *worker_name = "logerrors";
 static emit_log_hook_type prev_emit_log_hook = NULL;
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
 
-typedef struct hashkey {
+typedef struct error_code {
     int num;
 } ErrorCode;
 
 /* Depends on message_types_count, max_number_of_intervals */
 typedef struct message_info {
-    ErrorCode key;
-    pg_atomic_uint32 message_count[3];
-    /* Sum in buffer at previous interval */
-    int sum_in_buffer[3];
-    pg_atomic_uint32 intervals[3][360];
-    char *name;
+    int error_code;
+    Oid db_oid;
+    Oid user_oid;
+    int message_type_index;
 } MessageInfo;
+
+typedef struct error_name {
+    ErrorCode code;
+    char* name;
+} ErrorName;
 
 typedef struct slow_log_info {
     pg_atomic_uint32 count;
     pg_atomic_uint64 reset_time;
 } SlowLogInfo;
 
+typedef struct messages_buffer {
+    LWLock lock;
+    int current_interval_index;
+    pg_atomic_uint32 current_message_index;
+    /* depends on messages per interval and max intervals count */
+    MessageInfo buffer[messages_per_interval * max_actual_intervals_count];
+} MessagesBuffer;
+
 /* Depends on message_types_count */
 typedef struct global_info {
     int interval;
     int intervals_count;
+    /* Actual count of intervals in MessagesBuffer */
+    int actual_intervals_count;
     /* index of current interval in buffer */
-    pg_atomic_uint32 current_interval_index;
     pg_atomic_uint32 total_count[3];
     SlowLogInfo slow_log_info;
+    MessagesBuffer messagesBuffer;
 } GlobalInfo;
+
+typedef struct counter_hashelem {
+    MessageInfo key;
+    int counter;
+} CounterHashElem;
 
 static GlobalInfo *global_variables = NULL;
 
-static HTAB *messages_info_hashtable = NULL;
+static HTAB *error_names_hashtable = NULL;
 
 void logerrors_emit_log_hook(ErrorData *edata);
 
@@ -97,6 +123,8 @@ static void
 global_variables_init()
 {
     global_variables->intervals_count = intervals_count;
+    /* +5 because we don't want take lock on MessagesBuffer while pg_log_errors_stats is running */
+    global_variables->actual_intervals_count = intervals_count + 5;
     global_variables->interval = interval;
 }
 
@@ -108,27 +136,69 @@ slow_log_info_init()
 }
 
 static void
+add_message(int errCode, Oid db_oid, Oid user_oid, int message_type_index) {
+    int index_to_write;
+    int current_message;
+    if (global_variables == NULL)
+        return;
+    LWLockAcquire(&global_variables->messagesBuffer.lock, LW_EXCLUSIVE);
+    current_message = pg_atomic_read_u32(&global_variables->messagesBuffer.current_message_index);
+    index_to_write = global_variables->messagesBuffer.current_interval_index * messages_per_interval
+            + current_message;
+    if (current_message >= messages_per_interval) {
+        /* too many messages per one interval, save current instead of random message in interval */
+        srand(time(0));
+        index_to_write = rand() % messages_per_interval;
+    }
+
+    global_variables->messagesBuffer.buffer[index_to_write].db_oid = db_oid;
+    global_variables->messagesBuffer.buffer[index_to_write].user_oid = user_oid;
+    global_variables->messagesBuffer.buffer[index_to_write].error_code = errCode;
+    global_variables->messagesBuffer.buffer[index_to_write].message_type_index = message_type_index;
+    pg_atomic_write_u32(&global_variables->messagesBuffer.current_message_index, current_message + 1);
+    LWLockRelease(&global_variables->messagesBuffer.lock);
+}
+
+static char*
+get_user_by_oid(Oid user_oid)
+{
+    HeapTuple role_tuple;
+    char* result;
+    role_tuple = SearchSysCache1(AUTHOID, ObjectIdGetDatum(user_oid));
+    if (HeapTupleIsValid(role_tuple))
+    {
+        result = pstrdup(NameStr(((Form_pg_authid) GETSTRUCT(role_tuple))->rolname));
+        ReleaseSysCache(role_tuple);
+    }
+    else
+        result = "unknown";
+    
+    return result;
+}
+
+
+static void
 logerrors_init()
 {
     bool found;
     ErrorCode key;
-    MessageInfo *elem;
+    ErrorName* err_name;
     int i;
-    int j;
-    for (i = 0; i < error_types_count; ++i) {
+    for (i = 0; i < error_codes_count; ++i) {
         key.num = error_codes[i];
-        elem = hash_search(messages_info_hashtable, (void *) &key, HASH_ENTER, &found);
-        for (j = 0; j < message_types_count; ++j) {
-            pg_atomic_init_u32(&elem->message_count[j], 0);
-            elem->name = (char*)error_names[i];
-            MemSet(&(elem->intervals[j]), 0, max_number_of_intervals);
-            elem->sum_in_buffer[j] = 0;
-        }
+        err_name = hash_search(error_names_hashtable, (void *) &key, HASH_ENTER, &found);
+        err_name->name = (char*)error_names[i];
     }
-    pg_atomic_init_u32(&global_variables->current_interval_index, 0);
+    pg_atomic_init_u32(&global_variables->messagesBuffer.current_message_index, 0);
     MemSet(&global_variables->total_count, 0, message_types_count);
     for (i = 0; i < message_types_count; ++i) {
         pg_atomic_init_u32(&global_variables->total_count[i], 0);
+    }
+    for (i = 0; i < messages_per_interval * global_variables->actual_intervals_count; ++i) {
+        global_variables->messagesBuffer.buffer[i].error_code = -1;
+        global_variables->messagesBuffer.buffer[i].db_oid = -1;
+        global_variables->messagesBuffer.buffer[i].user_oid = -1;
+        global_variables->messagesBuffer.buffer[i].message_type_index = -1;
     }
     slow_log_info_init();
 }
@@ -136,33 +206,25 @@ logerrors_init()
 static void
 logerrors_update_info()
 {
-    ErrorCode key;
-    MessageInfo *info;
-    bool found;
     int i;
-    int j;
-    int message_count;
-    if (messages_info_hashtable == NULL || global_variables == NULL) {
+    int current_index;
+    int prev_index;
+    if (global_variables == NULL) {
         return;
     }
-    for (j = 0; j < message_types_count; ++j)
-    {
-        for (i = 0; i < error_types_count; ++i)
-        {
-            key.num = error_codes[i];
-            info = hash_search(messages_info_hashtable, (void *)&key, HASH_FIND, &found);
-            message_count = pg_atomic_read_u32(&info->message_count[j]);
-            info->sum_in_buffer[j] = info->sum_in_buffer[j] -
-                                     pg_atomic_read_u32(&info->intervals[j][pg_atomic_read_u32(&global_variables->current_interval_index)]) +
-                                     message_count;
-            pg_atomic_write_u32(&info->intervals[j][pg_atomic_read_u32(&global_variables->current_interval_index)],
-                                message_count);
-            pg_atomic_write_u32(&info->message_count[j], 0);
-
-        }
+    LWLockAcquire(&global_variables->messagesBuffer.lock, LW_EXCLUSIVE);
+    prev_index = global_variables->messagesBuffer.current_interval_index;
+    global_variables->messagesBuffer.current_interval_index = (prev_index + 1)
+            % global_variables->actual_intervals_count;
+    current_index = global_variables->messagesBuffer.current_interval_index;
+    for (i = 0; i < messages_per_interval; ++i) {
+        global_variables->messagesBuffer.buffer[i + current_index * messages_per_interval].error_code = -1;
+        global_variables->messagesBuffer.buffer[i + current_index * messages_per_interval].db_oid = -1;
+        global_variables->messagesBuffer.buffer[i + current_index * messages_per_interval].user_oid = -1;
+        global_variables->messagesBuffer.buffer[i + current_index * messages_per_interval].message_type_index = -1;
     }
-    pg_atomic_write_u32(&global_variables->current_interval_index,
-                        (pg_atomic_read_u32(&global_variables->current_interval_index) + 1) % global_variables->intervals_count);
+    pg_atomic_write_u32(&global_variables->messagesBuffer.current_message_index, 0);
+    LWLockRelease(&global_variables->messagesBuffer.lock);
 }
 
 void
@@ -206,27 +268,27 @@ logerrors_main(Datum main_arg)
 void
 logerrors_emit_log_hook(ErrorData *edata)
 {
-    MessageInfo *elem;
-    ErrorCode key;
-    bool found;
-    int j;
+    int lvl_i;
+    Oid user_oid;
+    Oid db_oid;
     /* Only if hashtable already inited */
-    if (messages_info_hashtable != NULL && global_variables != NULL && MyProc != NULL && !proc_exit_inprogress) {
-        for (j = 0; j < message_types_count; ++j)
+    if (global_variables != NULL && MyProc != NULL && !proc_exit_inprogress) {
+        for (lvl_i = 0; lvl_i < message_types_count; ++lvl_i)
         {
             /* Only current message type */
-            if (edata->elevel != message_types_codes[j]) {
+            if (edata->elevel != message_types_codes[lvl_i]) {
                 continue;
             }
-            key.num = edata->sqlerrcode;
-            elem = hash_search(messages_info_hashtable, (void *) &key, HASH_FIND, &found);
-            if (!found) {
-                elog(LOG, "logerrors_emit_log_hook not known error code %d", edata->sqlerrcode);
-                key.num = not_known_error_code;
-                elem = hash_search(messages_info_hashtable, (void *) &key, HASH_FIND, &found);
+            if (MyProcPort) {
+                user_oid = get_role_oid(MyProcPort->user_name, true);
+                db_oid = get_database_oid(MyProcPort->database_name, true);
             }
-            pg_atomic_fetch_add_u32(&elem->message_count[j], 1);
-            pg_atomic_fetch_add_u32(&global_variables->total_count[j], 1);
+            else {
+                user_oid = -1;
+                db_oid = -1;
+            }
+            add_message(edata->sqlerrcode, db_oid, user_oid, lvl_i);
+            pg_atomic_fetch_add_u32(&global_variables->total_count[lvl_i], 1);
         }
         if (edata && edata->message && strstr(edata->message, "duration:"))
         {
@@ -260,7 +322,7 @@ logerrors_load_params(void)
                             &intervals_count,
                             120,
                             2,
-                            360,
+                            max_intervals_count,
                             PGC_SUSET,
                             GUC_NO_RESET_ALL,
                             NULL,
@@ -281,7 +343,7 @@ _PG_init(void)
     shmem_startup_hook = pgss_shmem_startup;
     prev_emit_log_hook = emit_log_hook;
     emit_log_hook = logerrors_emit_log_hook;
-    RequestAddinShmemSpace(sizeof(MessageInfo) * error_types_count + sizeof(GlobalInfo));
+    RequestAddinShmemSpace((sizeof(ErrorCode) + sizeof(ErrorName)) * error_codes_count + sizeof(GlobalInfo));
     /* Worker parameter and registration */
     MemSet(&worker, 0, sizeof(BackgroundWorker));
     worker.bgw_flags = BGWORKER_SHMEM_ACCESS;
@@ -311,54 +373,155 @@ pgss_shmem_startup(void) {
     HASHCTL ctl;
     if (prev_shmem_startup_hook)
         prev_shmem_startup_hook();
-    messages_info_hashtable = NULL;
+    error_names_hashtable = NULL;
     global_variables = NULL;
     memset(&ctl, 0, sizeof(ctl));
     ctl.keysize = sizeof(ErrorCode);
-    ctl.entrysize = sizeof(MessageInfo);
-    messages_info_hashtable = ShmemInitHash("logerrors hash",
-                                            error_types_count, error_types_count,
+    ctl.entrysize = sizeof(ErrorName);
+    error_names_hashtable = ShmemInitHash("logerrors hash",
+                                            error_codes_count, error_codes_count,
                                             &ctl,
                                             HASH_ELEM | HASH_BLOBS);
     global_variables = ShmemInitStruct("logerrors global_variables",
                                        sizeof(GlobalInfo),
                                        &found);
-    if (!IsUnderPostmaster)
+    if (!IsUnderPostmaster) {
         global_variables_init();
         logerrors_init();
+    }
     return;
 }
 
 PG_FUNCTION_INFO_V1(pg_log_errors_stats);
 
+static void
+count_up_errors(int duration_in_intervals, int current_interval, HTAB* counters_hashtable) {
+    bool found;
+    int i;
+    int j;
+    int interval_index;
+    int message_index;
+    MessageInfo key;
+    CounterHashElem* elem;
+    if (global_variables == NULL || counters_hashtable == NULL){
+        return;
+    }
+    /* put all messages to hashtable */
+    for (i = duration_in_intervals; i > 0; --i) {
+        interval_index = (current_interval - i + global_variables->actual_intervals_count)
+                % global_variables->actual_intervals_count;
+        for (j = 0; j < messages_per_interval; ++j) {
+            message_index = interval_index * messages_per_interval + j;
+            if (global_variables->messagesBuffer.buffer[message_index].error_code == -1)
+                continue;
+            key.db_oid = global_variables->messagesBuffer.buffer[message_index].db_oid;
+            key.user_oid = global_variables->messagesBuffer.buffer[message_index].user_oid;
+            key.error_code = global_variables->messagesBuffer.buffer[message_index].error_code;
+            key.message_type_index = global_variables->messagesBuffer.buffer[message_index].message_type_index;
+            elem = hash_search(counters_hashtable, (void *) &key, HASH_FIND, &found);
+            if (!found) {
+                elem = hash_search(counters_hashtable, (void *) &key, HASH_ENTER, &found);
+                elem->counter = 0;
+            }
+            elem->counter++;
+        }
+    }
+}
+
+static void
+put_values_to_tuple(
+        int current_interval_index,
+        int duration_in_intervals,
+        HTAB* counters_hashtable,
+        TupleDesc tupdesc,
+        Tuplestorestate *tupstore){
+#define logerrors_COLS	6
+    Datum long_interval_values[logerrors_COLS];
+    bool long_interval_nulls[logerrors_COLS];
+    bool found;
+    int message_index;
+    int interval_index;
+    int i;
+    int j;
+    char* db_name;
+    ErrorName* err_name;
+    MessageInfo key;
+    ErrorCode err_code;
+    CounterHashElem *elem;
+    if (global_variables == NULL || counters_hashtable == NULL){
+        return;
+    }
+    count_up_errors(duration_in_intervals, current_interval_index, counters_hashtable);
+    for (i = duration_in_intervals; i > 0 ; --i) {
+        interval_index = (current_interval_index - i + global_variables->actual_intervals_count)
+                % global_variables->actual_intervals_count;
+        for (j = 0; j < messages_per_interval; ++j) {
+            message_index = interval_index * messages_per_interval + j;
+            if (global_variables->messagesBuffer.buffer[message_index].error_code == -1)
+                continue;
+            key.db_oid = global_variables->messagesBuffer.buffer[message_index].db_oid;
+            key.user_oid = global_variables->messagesBuffer.buffer[message_index].user_oid;
+            key.error_code = global_variables->messagesBuffer.buffer[message_index].error_code;
+            key.message_type_index = global_variables->messagesBuffer.buffer[message_index].message_type_index;
+            elem = hash_search(counters_hashtable, (void *) &key, HASH_FIND, &found);
+            if (!found) {
+                /* we already put this king of message to output */
+                continue;
+            }
+
+            MemSet(long_interval_values, 0, sizeof(long_interval_values));
+            MemSet(long_interval_nulls, 0, sizeof(long_interval_nulls));
+            for (j = 0; j < logerrors_COLS; ++j) {
+                long_interval_nulls[j] = false;
+            }
+            /* Time interval */
+            long_interval_values[0] = DatumGetInt32(global_variables->interval * duration_in_intervals / 1000);
+            /* Type */
+            long_interval_values[1] = CStringGetTextDatum(message_type_names[key.message_type_index]);
+            /* Message */
+            err_code.num = key.error_code;
+            err_name = hash_search(error_names_hashtable, (void *) &err_code, HASH_FIND, &found);
+            long_interval_values[2] = CStringGetTextDatum(err_name->name);
+            /* Count */
+            long_interval_values[3] = DatumGetInt32(elem->counter);
+            /* Username */
+            long_interval_values[4] = CStringGetTextDatum(get_user_by_oid(key.user_oid));
+            /* Database name */
+            db_name = get_database_name(key.db_oid);
+            if (db_name == NULL)
+                long_interval_values[5] = CStringGetTextDatum("unknown");
+            else
+                long_interval_values[5] = CStringGetTextDatum(db_name);
+
+            if (elem->counter > 0) {
+                tuplestore_putvalues(tupstore, tupdesc, long_interval_values, long_interval_nulls);
+            }
+            /* Now remove key from hashtable */
+            elem = hash_search(counters_hashtable, (void *) &key, HASH_REMOVE, &found);
+        }
+    }
+}
+
+
 Datum
 pg_log_errors_stats(PG_FUNCTION_ARGS)
 {
-#define logerrors_COLS	4
+#define logerrors_COLS	6
     ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
     TupleDesc	tupdesc;
     Tuplestorestate *tupstore;
     MemoryContext per_query_ctx;
     MemoryContext oldcontext;
-    ErrorCode key;
-    MessageInfo *info;
-
+    HASHCTL ctl;
+    HTAB* counters_hashtable;
     Datum long_interval_values[logerrors_COLS];
-    Datum short_interval_values[logerrors_COLS];
 
     bool long_interval_nulls[logerrors_COLS];
-    bool short_interval_nulls[logerrors_COLS];
-    bool found;
-    int short_interval;
-    int long_interval;
-    int prev_interval_index;
-    int errors_in_long_interval;
-    int errors_in_short_interval;
+    int current_interval_index;
     int lvl_i;
-    int i;
     int j;
     /* Shmem structs not ready yet */
-    if (messages_info_hashtable == NULL || global_variables == NULL) {
+    if (error_names_hashtable == NULL || global_variables == NULL) {
         ereport(ERROR,
                 (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
                         errmsg("logerrors must be loaded via shared_preload_libraries")));
@@ -379,6 +542,13 @@ pg_log_errors_stats(PG_FUNCTION_ARGS)
                 (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                         errmsg("return type must be a row type")));
 
+    counters_hashtable = NULL;
+    memset(&ctl, 0, sizeof(ctl));
+    ctl.keysize = sizeof(MessageInfo);
+    ctl.entrysize = sizeof(CounterHashElem);
+    /* an unshared hashtable can be expanded on-the-fly */
+    counters_hashtable = hash_create("counters hashtable", 1, &ctl, HASH_ELEM | HASH_BLOBS);
+
     per_query_ctx = rsinfo->econtext->ecxt_per_query_memory;
     oldcontext = MemoryContextSwitchTo(per_query_ctx);
 
@@ -388,6 +558,10 @@ pg_log_errors_stats(PG_FUNCTION_ARGS)
     rsinfo->setDesc = tupdesc;
     MemoryContextSwitchTo(oldcontext);
 
+    LWLockAcquire(&global_variables->messagesBuffer.lock, LW_EXCLUSIVE);
+    current_interval_index = global_variables->messagesBuffer.current_interval_index;
+    LWLockRelease(&global_variables->messagesBuffer.lock);
+    /* 'TOTAL' counters */
     for (lvl_i = 0; lvl_i < message_types_count; ++lvl_i) {
 
         /* Add total count to result */
@@ -404,55 +578,19 @@ pg_log_errors_stats(PG_FUNCTION_ARGS)
         long_interval_values[2] = CStringGetTextDatum("TOTAL");
         /* Count */
         long_interval_values[3] = DatumGetInt32(pg_atomic_read_u32(&global_variables->total_count[lvl_i]));
+        /* Username */
+        long_interval_nulls[4] = true;
+        /* Database name */
+        long_interval_nulls[5] = true;
         tuplestore_putvalues(tupstore, tupdesc, long_interval_values, long_interval_nulls);
-
-        /* Add specific error count */
-        for (i = 0; i < error_types_count; ++i) {
-            MemSet(long_interval_values, 0, sizeof(long_interval_values));
-            MemSet(short_interval_values, 0, sizeof(short_interval_values));
-            MemSet(long_interval_nulls, 0, sizeof(long_interval_nulls));
-            MemSet(short_interval_nulls, 0, sizeof(short_interval_nulls));
-            for (j = 0; j < logerrors_COLS; ++j) {
-                long_interval_nulls[j] = false;
-                short_interval_nulls[j] = false;
-            }
-            key.num = error_codes[i];
-            info = hash_search(messages_info_hashtable, (void *) &key, HASH_FIND, &found);
-            if (!found) {
-                continue;
-            }
-
-            short_interval = global_variables->interval / 1000;
-            long_interval = short_interval * global_variables->intervals_count;
-
-            /* Time interval */
-            long_interval_values[0] = DatumGetInt32(long_interval);
-            short_interval_values[0] = DatumGetInt32(short_interval);
-
-            /* Type */
-            long_interval_values[1] = CStringGetTextDatum(message_type_names[lvl_i]);
-            short_interval_values[1] = CStringGetTextDatum(message_type_names[lvl_i]);
-            /* Message */
-            long_interval_values[2] = CStringGetTextDatum(info->name);
-            short_interval_values[2] = CStringGetTextDatum(info->name);
-
-            /* Count */
-            prev_interval_index = (pg_atomic_read_u32(&global_variables->current_interval_index) - 1 + global_variables->intervals_count)
-                                  % global_variables->intervals_count;
-
-            errors_in_long_interval = info->sum_in_buffer[lvl_i];
-            errors_in_short_interval = pg_atomic_read_u32(&info->intervals[lvl_i][prev_interval_index]);
-            long_interval_values[3] = DatumGetInt32(errors_in_long_interval);
-            short_interval_values[3] = DatumGetInt32(errors_in_short_interval);
-
-            if (errors_in_long_interval > 0) {
-                tuplestore_putvalues(tupstore, tupdesc, long_interval_values, long_interval_nulls);
-            }
-            if (errors_in_short_interval > 0) {
-                tuplestore_putvalues(tupstore, tupdesc, short_interval_values, short_interval_nulls);
-            }
-        }
     }
+    /* short interval counters */
+    put_values_to_tuple(current_interval_index, 1, counters_hashtable, tupdesc, tupstore);
+    /* long interval counters */
+    put_values_to_tuple(current_interval_index, global_variables->intervals_count, counters_hashtable, tupdesc,
+            tupstore);
+    /* clean up */
+    hash_destroy(counters_hashtable);
     /* return the tuplestore */
     tuplestore_donestoring(tupstore);
     return (Datum) 0;
@@ -463,7 +601,7 @@ PG_FUNCTION_INFO_V1(pg_log_errors_reset);
 Datum
 pg_log_errors_reset(PG_FUNCTION_ARGS) {
 
-    if (messages_info_hashtable == NULL || global_variables == NULL) {
+    if (error_names_hashtable == NULL || global_variables == NULL) {
         ereport(ERROR,
                 (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
                         errmsg("logerrors must be loaded via shared_preload_libraries")));
