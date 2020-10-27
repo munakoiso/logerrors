@@ -272,7 +272,7 @@ logerrors_emit_log_hook(ErrorData *edata)
     Oid user_oid;
     Oid db_oid;
     /* Only if hashtable already inited */
-    if (global_variables != NULL && MyProc != NULL && !proc_exit_inprogress) {
+    if (global_variables != NULL && MyProc != NULL && !proc_exit_inprogress && !got_sigterm) {
         for (lvl_i = 0; lvl_i < message_types_count; ++lvl_i)
         {
             /* Only current message type */
