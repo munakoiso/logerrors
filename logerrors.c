@@ -12,19 +12,17 @@
 #include "utils/guc.h"
 #include "utils/snapmgr.h"
 #include "miscadmin.h"
-
 #include "utils/memutils.h"
 #include "utils/hsearch.h"
 #include "utils/builtins.h"
 #include "funcapi.h"
-
 #include "libpq/libpq.h"
 #include "libpq/pqformat.h"
-
 #include "catalog/pg_authid.h"
 #include "utils/syscache.h"
 #include "access/htup_details.h"
 #include "commands/dbcommands.h"
+#include "utils/resowner.h"
 
 #include "constants.h"
 
@@ -279,7 +277,7 @@ logerrors_emit_log_hook(ErrorData *edata)
             if (edata->elevel != message_types_codes[lvl_i]) {
                 continue;
             }
-            if (MyProcPort) {
+            if (MyProcPort && CurrentResourceOwner != NULL) {
                 user_oid = get_role_oid(MyProcPort->user_name, true);
                 db_oid = get_database_oid(MyProcPort->database_name, true);
             }
