@@ -187,6 +187,7 @@ logerrors_init()
     }
     pg_atomic_init_u32(&global_variables->messagesBuffer.current_message_index, 0);
     MemSet(&global_variables->total_count, 0, message_types_count);
+    LWLockInitialize(&global_variables->messagesBuffer.lock, LWLockNewTrancheId());
     for (i = 0; i < message_types_count; ++i) {
         pg_atomic_init_u32(&global_variables->total_count[i], 0);
     }
@@ -431,6 +432,7 @@ put_values_to_tuple(
     int k;
     char* db_name;
     char* user_name;
+    char err_name_str[100];
     ErrorName* err_name;
     MessageInfo key;
     ErrorCode err_code;
@@ -468,7 +470,12 @@ put_values_to_tuple(
             /* Message */
             err_code.num = key.error_code;
             err_name = hash_search(error_names_hashtable, (void *) &err_code, HASH_FIND, &found);
-            long_interval_values[2] = CStringGetTextDatum(err_name->name);
+            if (found)
+                long_interval_values[2] = CStringGetTextDatum(err_name->name);
+            else {
+                sprintf(err_name_str, "NOT_KNOWN_ERROR: %d", key.error_code);
+                long_interval_values[2] = CStringGetTextDatum(err_name_str);
+            }
             /* Count */
             long_interval_values[3] = DatumGetInt32(elem->counter);
             /* Username */
