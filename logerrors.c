@@ -271,9 +271,11 @@ logerrors_emit_log_hook(ErrorData *edata)
         for (lvl_i = 0; lvl_i < message_types_count; ++lvl_i)
         {
             /* Only current message type */
-            if (edata->elevel != message_types_codes[lvl_i]) {
+            if (edata->elevel != message_types_codes[lvl_i])
                 continue;
-            }
+            /* Ignore ERRCODE_CRASH_SHUTDOWN because of lock problems */
+            if (edata->sqlerrcode == ERRCODE_CRASH_SHUTDOWN)
+                continue;
             add_message(edata->sqlerrcode, MyDatabaseId, GetUserId(), lvl_i);
             pg_atomic_fetch_add_u32(&global_variables->total_count[lvl_i], 1);
         }
