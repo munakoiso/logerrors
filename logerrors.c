@@ -50,6 +50,8 @@ static char *worker_name = "logerrors";
 static emit_log_hook_type prev_emit_log_hook = NULL;
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
 
+char* excluded_errcodes_str= NULL;
+
 typedef struct error_code {
     int num;
 } ErrorCode;
@@ -90,6 +92,8 @@ typedef struct global_info {
     pg_atomic_uint32 total_count[3];
     SlowLogInfo slow_log_info;
     MessagesBuffer messagesBuffer;
+    int excluded_errcodes[error_codes_count];
+    int excluded_errcodes_count;
 } GlobalInfo;
 
 typedef struct counter_hashelem {
@@ -118,10 +122,44 @@ void logerrors_main(Datum) pg_attribute_noreturn();
 static void
 global_variables_init()
 {
+    long errcode;
+    char* end;
+    int errcodes_count;
+    char* excluded_errcode_str;
+    char excluded_errcodes_copy[error_codes_count * (max_length_of_error_code + 1)];
     global_variables->intervals_count = intervals_count;
     /* +5 because we don't want take lock on MessagesBuffer while pg_log_errors_stats is running */
     global_variables->actual_intervals_count = intervals_count + 5;
     global_variables->interval = interval;
+
+    memset(&global_variables->excluded_errcodes, '\0', sizeof(global_variables->excluded_errcodes));
+
+    errcodes_count = sizeof(excluded_errcodes) / sizeof(excluded_errcodes[0]);
+    global_variables->excluded_errcodes_count = errcodes_count;
+
+    memcpy(&global_variables->excluded_errcodes[0], excluded_errcodes, sizeof(excluded_errcodes));
+    if (excluded_errcodes_str == NULL)
+        return;
+    memset(&excluded_errcodes_copy, '\0', sizeof(excluded_errcodes_copy));
+    strlcpy(&excluded_errcodes_copy[0], excluded_errcodes_str, error_codes_count * max_length_of_error_code - 1);
+
+    excluded_errcode_str = strtok(excluded_errcodes_copy, ",");
+    while (excluded_errcode_str != NULL) {
+        errno = 0;
+        errcode = strtol(excluded_errcode_str, &end, 10);
+        /* Ignore incorrect codes */
+        if (errno != 0) {
+            excluded_errcode_str = strtok(NULL, " ");
+            elog(ERROR, "Invalid value of logerrors.excluded_errcodes");
+            break;
+        }
+        global_variables->excluded_errcodes[global_variables->excluded_errcodes_count] = errcode;
+        global_variables->excluded_errcodes_count += 1;
+        if (global_variables->excluded_errcodes_count == error_codes_count - 1)
+            break;
+
+        excluded_errcode_str = strtok(NULL, " ");
+    }
 }
 
 static void
@@ -266,6 +304,8 @@ void
 logerrors_emit_log_hook(ErrorData *edata)
 {
     int lvl_i;
+    int err_code_index;
+    bool skip;
     /* Only if hashtable already inited */
     if (global_variables != NULL && MyProc != NULL && !proc_exit_inprogress && !got_sigterm) {
         for (lvl_i = 0; lvl_i < message_types_count; ++lvl_i)
@@ -273,8 +313,14 @@ logerrors_emit_log_hook(ErrorData *edata)
             /* Only current message type */
             if (edata->elevel != message_types_codes[lvl_i])
                 continue;
-            /* Ignore ERRCODE_CRASH_SHUTDOWN because of lock problems */
-            if (edata->sqlerrcode == ERRCODE_CRASH_SHUTDOWN)
+            skip = false;
+            for (err_code_index = 0; err_code_index < global_variables->excluded_errcodes_count; ++err_code_index) {
+                if (edata->sqlerrcode == global_variables->excluded_errcodes[err_code_index]) {
+                    skip = true;
+                    break;
+                }
+            }
+            if (skip)
                 continue;
             add_message(edata->sqlerrcode, MyDatabaseId, GetUserId(), lvl_i);
             pg_atomic_fetch_add_u32(&global_variables->total_count[lvl_i], 1);
@@ -317,6 +363,16 @@ logerrors_load_params(void)
                             NULL,
                             NULL,
                             NULL);
+    DefineCustomStringVariable("logerrors.excluded_errcodes",
+                               "Excluded error codes separated by ','",
+                               NULL,
+                               &excluded_errcodes_str,
+                               NULL,
+                               PGC_POSTMASTER,
+                               GUC_NO_RESET_ALL,
+                               NULL,
+                               NULL,
+                               NULL);
 }
 /*
  * Entry point for worker loading
