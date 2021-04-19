@@ -25,7 +25,7 @@ In output you can see 4 columns:
     time_interval: how long (in seconds) has statistics been collected.
     type: postgresql type of message (now supports only these: warning, error, fatal).
     message: code of message from log_hook. (or 'TOTAL' for total count of that type messages)
-    count: count of massages of this type at this time_interval in log.
+    count: count of messages of this type at this time_interval in log.
 
 To get number of lines in slow log call `pg_slow_log_stats()`:
 
