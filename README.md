@@ -1,6 +1,13 @@
-Extension for PostgreSQL for collecting statistics about messages in logfile
+Extension for PostgreSQL for collecting statistics about messages in logfile.
+
+Configuration variables:
+* `logerrors.interval` - Time between writing statistic to buffer (ms). Default of **5s**, max of **60s**;
+* `logerrors.intervals_count` - Count of intervals in buffer. Default of **120**, max of **360**. During this count of intervals messages doesn't dropping from statistic;
+* `logerrors.excluded_errcodes` - Excluded error codes separated by "**,**".
 
 ## Install
+
+The extension must be loaded via `shared_preload_libraries`.
 
 Run psql command:
 
@@ -8,7 +15,7 @@ Run psql command:
 
 ## Usage
 
-   After creating extension you can call pg_log_errors_stats function in psql(without any arguments)
+   After creating extension you can call `pg_log_errors_stats()` function in psql (without any arguments).
 
 ```
     postgres=# select * from pg_log_errors_stats();
