@@ -122,11 +122,10 @@ void logerrors_main(Datum) pg_attribute_noreturn();
 static void
 global_variables_init()
 {
-    long errcode;
-    char* end;
+    int sqlstate;
     int errcodes_count;
     char* excluded_errcode_str;
-    char excluded_errcodes_copy[error_codes_count * (max_length_of_error_code + 1)];
+    char excluded_errcodes_copy[error_codes_count * (len_sqlstate_str + 1)];
     global_variables->intervals_count = intervals_count;
     /* +5 because we don't want take lock on MessagesBuffer while pg_log_errors_stats is running */
     global_variables->actual_intervals_count = intervals_count + 5;
@@ -141,24 +140,27 @@ global_variables_init()
     if (excluded_errcodes_str == NULL)
         return;
     memset(&excluded_errcodes_copy, '\0', sizeof(excluded_errcodes_copy));
-    strlcpy(&excluded_errcodes_copy[0], excluded_errcodes_str, error_codes_count * max_length_of_error_code - 1);
+    strlcpy(&excluded_errcodes_copy[0], excluded_errcodes_str, error_codes_count * (len_sqlstate_str + 1) - 1);
 
     excluded_errcode_str = strtok(excluded_errcodes_copy, ",");
     while (excluded_errcode_str != NULL) {
-        errno = 0;
-        errcode = strtol(excluded_errcode_str, &end, 10);
-        /* Ignore incorrect codes */
-        if (errno != 0) {
-            excluded_errcode_str = strtok(NULL, " ");
-            elog(ERROR, "Invalid value of logerrors.excluded_errcodes");
-            break;
+        if (strlen(excluded_errcode_str) != len_sqlstate_str) {
+            elog(WARNING, "logerrors: errcode length should be equal to %d", len_sqlstate_str);
+            excluded_errcode_str = strtok(NULL, ",");
+            continue;
         }
-        global_variables->excluded_errcodes[global_variables->excluded_errcodes_count] = errcode;
+        sqlstate = MAKE_SQLSTATE(excluded_errcode_str[0],
+                                 excluded_errcode_str[1],
+                                 excluded_errcode_str[2],
+                                 excluded_errcode_str[3],
+                                 excluded_errcode_str[4]);
+
+        global_variables->excluded_errcodes[global_variables->excluded_errcodes_count] = sqlstate;
         global_variables->excluded_errcodes_count += 1;
         if (global_variables->excluded_errcodes_count == error_codes_count - 1)
             break;
 
-        excluded_errcode_str = strtok(NULL, " ");
+        excluded_errcode_str = strtok(NULL, ",");
     }
 }
 
