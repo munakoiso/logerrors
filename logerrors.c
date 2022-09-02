@@ -32,7 +32,7 @@ void _PG_init(void);
 void _PG_fini(void);
 
 /* Shared memory init */
-static void pgss_shmem_startup(void);
+static void logerrors_shmem_startup(void);
 
 /* Signal handling */
 static volatile sig_atomic_t got_sigterm = false;
@@ -49,6 +49,10 @@ static char *worker_name = "logerrors";
 
 static emit_log_hook_type prev_emit_log_hook = NULL;
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
+#if (PG_VERSION_NUM >= 150000)
+static shmem_request_hook_type prev_shmem_request_hook = NULL;
+static void logerrors_shmem_request(void);
+#endif
 
 char* excluded_errcodes_str= NULL;
 
@@ -387,10 +391,15 @@ _PG_init(void)
         return;
     }
     prev_shmem_startup_hook = shmem_startup_hook;
-    shmem_startup_hook = pgss_shmem_startup;
+    shmem_startup_hook = logerrors_shmem_startup;
     prev_emit_log_hook = emit_log_hook;
     emit_log_hook = logerrors_emit_log_hook;
+#if (PG_VERSION_NUM >= 150000)
+    prev_shmem_request_hook = shmem_request_hook;
+    shmem_request_hook = logerrors_shmem_request;
+#else
     RequestAddinShmemSpace((sizeof(ErrorCode) + sizeof(ErrorName)) * error_codes_count + sizeof(GlobalInfo));
+#endif
     /* Worker parameter and registration */
     MemSet(&worker, 0, sizeof(BackgroundWorker));
     worker.bgw_flags = BGWORKER_SHMEM_ACCESS;
@@ -414,7 +423,7 @@ _PG_fini(void)
 }
 
 static void
-pgss_shmem_startup(void) {
+logerrors_shmem_startup(void) {
     bool found;
     HASHCTL ctl;
     if (prev_shmem_startup_hook)
@@ -437,6 +446,20 @@ pgss_shmem_startup(void) {
     }
     return;
 }
+
+#if (PG_VERSION_NUM >= 150000)
+/*
+ * Requests any additional shared memory required for our extension
+ */
+static void
+logerrors_shmem_request(void)
+{
+    if (prev_shmem_request_hook)
+        prev_shmem_request_hook();
+
+    RequestAddinShmemSpace((sizeof(ErrorCode) + sizeof(ErrorName)) * error_codes_count + sizeof(GlobalInfo));
+}
+#endif
 
 PG_FUNCTION_INFO_V1(pg_log_errors_stats);
 
