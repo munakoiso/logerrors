@@ -504,7 +504,7 @@ put_values_to_tuple(
         HTAB* counters_hashtable,
         TupleDesc tupdesc,
         Tuplestorestate *tupstore){
-#define logerrors_COLS	6
+#define logerrors_COLS	7
     Datum long_interval_values[logerrors_COLS];
     bool long_interval_nulls[logerrors_COLS];
     bool found;
@@ -574,6 +574,14 @@ put_values_to_tuple(
             else
                 long_interval_values[5] = CStringGetTextDatum(db_name);
 
+            /* SQLState */
+            if (found) {
+                long_interval_values[6] = CStringGetTextDatum(unpack_sql_state(err_code.num));
+            }
+            else {
+                long_interval_values[6] = true;
+            }
+
             if (elem->counter > 0) {
                 tuplestore_putvalues(tupstore, tupdesc, long_interval_values, long_interval_nulls);
             }
@@ -587,7 +595,7 @@ put_values_to_tuple(
 Datum
 pg_log_errors_stats(PG_FUNCTION_ARGS)
 {
-#define logerrors_COLS	6
+#define logerrors_COLS	7
     ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
     TupleDesc	tupdesc;
     Tuplestorestate *tupstore;
@@ -663,6 +671,8 @@ pg_log_errors_stats(PG_FUNCTION_ARGS)
         long_interval_nulls[4] = true;
         /* Database name */
         long_interval_nulls[5] = true;
+        /* sqlstate */
+        long_interval_nulls[6] = true;
         tuplestore_putvalues(tupstore, tupdesc, long_interval_values, long_interval_nulls);
     }
     /* short interval counters */
