@@ -579,7 +579,7 @@ put_values_to_tuple(
                 long_interval_values[6] = CStringGetTextDatum(unpack_sql_state(err_code.num));
             }
             else {
-                long_interval_values[6] = true;
+                long_interval_nulls[6] = true;
             }
 
             if (elem->counter > 0) {
