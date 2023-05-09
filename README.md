@@ -13,6 +13,41 @@ Run psql command:
 
     $ CREATE EXTENSION logerrors;
 
+## Tests
+
+The extension uses standard pgxs regression tests. Run `make installcheck` to run all psql scripts defined in `sql` directory. Output of each is then evaluated by `diff` with corresponding expected output stored in the `expected` directory. 
+
+```
+    $ make installcheck
+    +++ regress install-check in  +++
+    ============== creating temporary instance            ==============
+    ============== initializing database system           ==============
+    ============== starting postmaster                    ==============
+    running on port 51698 with PID 472134
+    ============== creating database "contrib_regression" ==============
+    CREATE DATABASE
+    ALTER DATABASE
+    ALTER DATABASE
+    ALTER DATABASE
+    ALTER DATABASE
+    ALTER DATABASE
+    ALTER DATABASE
+    ============== installing logerrors                   ==============
+    CREATE EXTENSION
+    ============== creating role "postgres"               ==============
+    CREATE ROLE
+    GRANT
+    ============== running regression test queries        ==============
+    test logerrors                    ... ok        15017 ms
+    ============== shutting down postmaster               ==============
+    ============== removing temporary instance            ==============
+
+=====================
+ All 1 tests passed. 
+=====================
+
+```
+
 ## Usage
 
    After creating extension you can call `pg_log_errors_stats()` function in psql (without any arguments).
