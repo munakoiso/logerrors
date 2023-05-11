@@ -1,0 +1,60 @@
+SET ROLE postgres;
+SELECT pg_log_errors_reset();
+ pg_log_errors_reset 
+---------------------
+ 
+(1 row)
+
+SELECT blah();
+ERROR:  function blah() does not exist
+LINE 1: SELECT blah();
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+SELECT pg_sleep(10);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+SELECT * FROM pg_log_errors_stats();
+ time_interval |  type   |          message           | count | username |      database      | sqlstate 
+---------------+---------+----------------------------+-------+----------+--------------------+----------
+               | WARNING | TOTAL                      |     0 |          |                    | 
+               | ERROR   | TOTAL                      |     1 |          |                    | 
+               | FATAL   | TOTAL                      |     0 |          |                    | 
+           600 | ERROR   | ERRCODE_UNDEFINED_FUNCTION |     1 | postgres | contrib_regression | 42883
+(4 rows)
+
+DO LANGUAGE plpgsql $$
+BEGIN
+    RAISE SQLSTATE 'XXXXX';
+END;
+$$;
+ERROR:  XXXXX
+CONTEXT:  PL/pgSQL function inline_code_block line 3 at RAISE
+DO LANGUAGE plpgsql $$
+BEGIN
+    RAISE SQLSTATE 'XXXXY';
+END;
+$$;
+ERROR:  XXXXY
+CONTEXT:  PL/pgSQL function inline_code_block line 3 at RAISE
+SELECT pg_sleep(5);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+SELECT * FROM pg_log_errors_stats();
+ time_interval |  type   |          message           | count | username |      database      | sqlstate 
+---------------+---------+----------------------------+-------+----------+--------------------+----------
+               | WARNING | TOTAL                      |     0 |          |                    | 
+               | ERROR   | TOTAL                      |     3 |          |                    | 
+               | FATAL   | TOTAL                      |     0 |          |                    | 
+             5 | ERROR   | NOT_KNOWN_ERROR            |     1 | postgres | contrib_regression | XXXXX
+             5 | ERROR   | NOT_KNOWN_ERROR            |     1 | postgres | contrib_regression | XXXXY
+           600 | ERROR   | ERRCODE_UNDEFINED_FUNCTION |     1 | postgres | contrib_regression | 42883
+           600 | ERROR   | NOT_KNOWN_ERROR            |     1 | postgres | contrib_regression | XXXXX
+           600 | ERROR   | NOT_KNOWN_ERROR            |     1 | postgres | contrib_regression | XXXXY
+(8 rows)
+

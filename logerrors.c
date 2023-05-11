@@ -556,7 +556,7 @@ put_values_to_tuple(
             if (found)
                 long_interval_values[2] = CStringGetTextDatum(err_name->name);
             else {
-                sprintf(err_name_str, "NOT_KNOWN_ERROR: %d", key.error_code);
+                sprintf(err_name_str, "NOT_KNOWN_ERROR");
                 long_interval_values[2] = CStringGetTextDatum(err_name_str);
             }
             /* Count */
@@ -575,12 +575,7 @@ put_values_to_tuple(
                 long_interval_values[5] = CStringGetTextDatum(db_name);
 
             /* SQLState */
-            if (found) {
-                long_interval_values[6] = CStringGetTextDatum(unpack_sql_state(err_code.num));
-            }
-            else {
-                long_interval_nulls[6] = true;
-            }
+            long_interval_values[6] = CStringGetTextDatum(unpack_sql_state(err_code.num));
 
             if (elem->counter > 0) {
                 tuplestore_putvalues(tupstore, tupdesc, long_interval_values, long_interval_nulls);

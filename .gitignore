@@ -1,1 +1,6 @@
 .idea
+results/*
+log/*
+logerrors.o
+logerrors.so
+regression-test/*
