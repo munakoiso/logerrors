@@ -121,9 +121,7 @@ logerrors_sigterm(SIGNAL_ARGS)
     errno = save_errno;
 }
 
-void 
-__attribute__ ((visibility ("default")))
-logerrors_main(Datum) pg_attribute_noreturn();
+PGDLLEXPORT void logerrors_main(Datum) pg_attribute_noreturn();
 
 static void
 global_variables_init()
@@ -271,7 +269,6 @@ logerrors_update_info()
 }
 
 void
-__attribute__ ((visibility ("default")))
 logerrors_main(Datum main_arg)
 {
     /* Register functions for SIGTERM management */
