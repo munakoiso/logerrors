@@ -121,7 +121,7 @@ logerrors_sigterm(SIGNAL_ARGS)
     errno = save_errno;
 }
 
-void logerrors_main(Datum) pg_attribute_noreturn();
+PGDLLEXPORT void logerrors_main(Datum) pg_attribute_noreturn();
 
 static void
 global_variables_init()
