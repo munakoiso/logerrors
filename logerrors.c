@@ -21,6 +21,9 @@
 #include "access/htup_details.h"
 #include "commands/dbcommands.h"
 #include "utils/resowner.h"
+#if PG_VERSION_NUM < 100000
+#include "port/atomics.h"
+#endif
 
 #include "constants.h"
 
@@ -283,7 +286,11 @@ logerrors_main(Datum main_arg)
         int rc;
         /* Wait necessary amount of time */
         rc = WaitLatch(&MyProc->procLatch,
+#if PG_VERSION_NUM < 100000
+                       WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH, interval);
+#else
                        WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH, interval, PG_WAIT_EXTENSION);
+#endif
 
         ResetLatch(&MyProc->procLatch);
         /* Emergency bailout if postmaster has died */
@@ -436,7 +443,11 @@ logerrors_shmem_startup(void) {
     error_names_hashtable = ShmemInitHash("logerrors hash",
                                             error_codes_count, error_codes_count,
                                             &ctl,
+#if PG_VERSION_NUM < 100000
+                                            HASH_ELEM);
+#else
                                             HASH_ELEM | HASH_BLOBS);
+#endif
     global_variables = ShmemInitStruct("logerrors global_variables",
                                        sizeof(GlobalInfo),
                                        &found);
@@ -631,7 +642,11 @@ pg_log_errors_stats(PG_FUNCTION_ARGS)
     ctl.keysize = sizeof(MessageInfo);
     ctl.entrysize = sizeof(CounterHashElem);
     /* an unshared hashtable can be expanded on-the-fly */
+#if PG_VERSION_NUM < 100000
+    counters_hashtable = hash_create("counters hashtable", 1, &ctl, HASH_ELEM);
+#else
     counters_hashtable = hash_create("counters hashtable", 1, &ctl, HASH_ELEM | HASH_BLOBS);
+#endif
 
     per_query_ctx = rsinfo->econtext->ecxt_per_query_memory;
     oldcontext = MemoryContextSwitchTo(per_query_ctx);
