@@ -715,7 +715,9 @@ pg_slow_log_stats(PG_FUNCTION_ARGS)
 
     /* Shmem structs not ready yet */
     if (global_variables == NULL) {
-        return (Datum) 0;
+         ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("logerrors must be loaded via shared_preload_libraries")));
     }
     /* check to see if caller supports us returning a tuplestore */
     if (rsinfo == NULL || !IsA(rsinfo, ReturnSetInfo))
