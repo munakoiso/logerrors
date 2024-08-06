@@ -676,8 +676,6 @@ pg_log_errors_stats(PG_FUNCTION_ARGS)
             tupstore);
     /* clean up */
     hash_destroy(counters_hashtable);
-    /* return the tuplestore */
-    tuplestore_donestoring(tupstore);
     return (Datum) 0;
 }
 
@@ -753,7 +751,5 @@ pg_slow_log_stats(PG_FUNCTION_ARGS)
     result_values[1] = DatumGetTimestamp(pg_atomic_read_u64(&global_variables->slow_log_info.reset_time));
 
     tuplestore_putvalues(tupstore, tupdesc, result_values, result_nulls);
-    /* return the tuplestore */
-    tuplestore_donestoring(tupstore);
     return (Datum) 0;
 }
