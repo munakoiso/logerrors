@@ -123,7 +123,7 @@ logerrors_sigterm(SIGNAL_ARGS)
     errno = save_errno;
 }
 
-#if PG_VERSION_NUM >= 100000
+#if PG_VERSION_NUM >= 180000
 PGDLLEXPORT pg_noreturn void logerrors_main(Datum);
 #else
 PGDLLEXPORT void logerrors_main(Datum) pg_attribute_noreturn();
