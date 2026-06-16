@@ -47,6 +47,12 @@ static int interval = 5000;
 /* While that count of intervals messages doesn't dropping from statistic */
 static int intervals_count = 120;
 
+/* Misc init */
+static void slow_log_info_init(void);
+static void global_variables_init(void);
+static void logerrors_init(void);
+static void logerrors_update_info(void);
+
 /* Worker name */
 static char *worker_name = "logerrors";
 
@@ -130,7 +136,7 @@ PGDLLEXPORT void logerrors_main(Datum) pg_attribute_noreturn();
 #endif
 
 static void
-global_variables_init()
+global_variables_init(void)
 {
     int sqlstate;
     int errcodes_count;
@@ -174,7 +180,7 @@ global_variables_init()
 }
 
 static void
-slow_log_info_init()
+slow_log_info_init(void)
 {
     pg_atomic_init_u32(&global_variables->slow_log_info.count, 0);
     pg_atomic_init_u64(&global_variables->slow_log_info.reset_time, GetCurrentTimestamp());
@@ -214,7 +220,7 @@ get_user_by_oid(Oid user_oid)
 
 
 static void
-logerrors_init()
+logerrors_init(void)
 {
     bool found;
     ErrorCode key;
@@ -241,7 +247,7 @@ logerrors_init()
 }
 
 static void
-logerrors_update_info()
+logerrors_update_info(void)
 {
     int i;
     int current_interval;
