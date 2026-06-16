@@ -431,7 +431,11 @@ logerrors_shmem_startup(void) {
     ctl.keysize = sizeof(ErrorCode);
     ctl.entrysize = sizeof(ErrorName);
     error_names_hashtable = ShmemInitHash("logerrors hash",
+#if PG_VERSION_NUM < 190000
                                             error_codes_count, error_codes_count,
+#else
+					    error_codes_count,
+#endif
                                             &ctl,
 #if PG_VERSION_NUM < 100000
                                             HASH_ELEM);
