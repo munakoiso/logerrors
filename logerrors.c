@@ -18,6 +18,10 @@
 #include "funcapi.h"
 #include "catalog/pg_authid.h"
 #include "utils/syscache.h"
+#if PG_VERSION_NUM >= 190000
+#include "utils/lsyscache.h"
+#include "utils/tuplestore.h"
+#endif
 #include "access/htup_details.h"
 #include "commands/dbcommands.h"
 #include "utils/resowner.h"
