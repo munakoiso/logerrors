@@ -67,7 +67,7 @@ static shmem_request_hook_type prev_shmem_request_hook = NULL;
 static void logerrors_shmem_request(void);
 #endif
 
-char* excluded_errcodes_str= NULL;
+static char* excluded_errcodes_str= NULL;
 
 typedef struct error_code {
     int num;
@@ -134,7 +134,7 @@ logerrors_sigterm(SIGNAL_ARGS)
 }
 
 #if PG_VERSION_NUM >= 180000
-PGDLLEXPORT pg_noreturn void logerrors_main(Datum);
+pg_noreturn PGDLLEXPORT void logerrors_main(Datum);
 #else
 PGDLLEXPORT void logerrors_main(Datum) pg_attribute_noreturn();
 #endif
